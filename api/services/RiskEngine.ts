@@ -11,6 +11,7 @@ import {
   subscriptions,
   protectionLogs,
   notifications,
+  trades,
   type Account,
   type Subscription,
 } from "@db/schema";
@@ -19,6 +20,20 @@ import {
 // TIPOS
 // ============================================================
 
+interface BrokerTrade {
+  brokerTradeId: string;
+  symbol: string;
+  direction: "buy" | "sell";
+  leverage: number;
+  lotSize: number;
+  entryPrice: number;
+  exitPrice?: number;
+  profitLoss: number;
+  status: "open" | "closed";
+  openedAt: Date;
+  closedAt?: Date;
+}
+
 interface BrokerData {
   balance: number;
   equity: number;
@@ -26,6 +41,7 @@ interface BrokerData {
   profitSemanal: number;  // P&L de esta semana
   profitMensual: number;  // P&L de este mes
   posicionesAbiertas: number;
+  trades: BrokerTrade[];  // Operaciones actuales del broker
   timestamp: Date;
 }
 
@@ -33,6 +49,7 @@ interface ConfigCliente {
   userId: number;
   accountId: number;
   tipoPlan: "basic" | "trailing";
+  periodoDias: number;    // 30, 90, 180, 365
   capitalInicial: number;
   limiteDiarioPct: number;
   limiteSemanalPct: number;
@@ -100,11 +117,12 @@ export async function cargarConfiguracionCliente(
     userId: cuenta.userId,
     accountId: cuenta.id,
     tipoPlan: suscripcion.planType,
+    periodoDias: suscripcion.periodDays,
     capitalInicial: parseMoney(cuenta.initialCapital),
     limiteDiarioPct: parsePct(cuenta.dailyLimitPct),
     limiteSemanalPct: parsePct(cuenta.weeklyLimitPct),
     limiteMensualPct: parsePct(cuenta.monthlyLimitPct),
-    trailingActivo: cuenta.trailingEnabled,
+    trailingActivo: cuenta.trailingEnabled && suscripcion.planType === "trailing",
     trailingActivacionPct: parsePct(cuenta.trailingActivationPct),
     trailingProteccionPct: parsePct(cuenta.trailingProtectionPct),
   };
@@ -145,6 +163,7 @@ export async function obtenerDatosBroker(accountId: number): Promise<BrokerData>
     profitSemanal: profitTotal * 0.6,  // Simulado: 60% es de esta semana
     profitMensual: profitTotal,        // 100% es del mes
     posicionesAbiertas: 0,             // TODO: leer de broker
+    trades: [],                        // TODO: leer trades reales del broker
     timestamp: new Date(),
   };
 }
@@ -281,13 +300,24 @@ async function ejecutarCierre(
   // 6.1 TODO: Cerrar posiciones via API del broker
   // await brokerAPI.closeAllPositions(config.accountId);
 
-  // 6.2 Bloquear cuenta
+  // 6.2 Marcar trades abiertas como cerradas por proteccion (antes de bloquear cuenta)
+  const motivoProteccion = resultado.motivo === "TRAILING_STOP_HIT"
+    ? "trailing_stop"
+    : resultado.motivo === "DAILY_LIMIT_BREACH"
+    ? "daily_limit"
+    : resultado.motivo === "WEEKLY_LIMIT_BREACH"
+    ? "weekly_limit"
+    : "monthly_limit";
+
+  await cerrarTradesPorProteccion(config.accountId, motivoProteccion as any, config);
+
+  // 6.3 Bloquear cuenta
   await db
     .update(accounts)
     .set({ isActive: false })
     .where(eq(accounts.id, config.accountId));
 
-  // 6.3 Registrar log de proteccion
+  // 6.4 Registrar log de proteccion
   await db.insert(protectionLogs).values({
     accountId: config.accountId,
     userId: config.userId,
@@ -296,7 +326,7 @@ async function ejecutarCierre(
     notes: resultado.mensaje || "Cierre automatico ejecutado",
   });
 
-  // 6.4 Enviar notificacion
+  // 6.5 Enviar notificacion
   const titulo =
     resultado.motivo === "TRAILING_STOP_HIT"
       ? "Trailing activado: ganancias protegidas"
@@ -316,7 +346,7 @@ async function ejecutarCierre(
       `Tu cuenta ha sido protegida. Motivo: ${resultado.motivo}. Podras operar nuevamente manana.`,
   });
 
-  // 6.5 Si es trailing, enviar mensaje positivo
+  // 6.6 Si es trailing, enviar mensaje positivo
   if (resultado.motivo === "TRAILING_STOP_HIT") {
     await enviarMensajePositivo(config.userId, resultado.monto || 0);
   }
@@ -361,6 +391,138 @@ async function actualizarBalance(accountId: number, nuevoBalance: number): Promi
 }
 
 // ============================================================
+// 8.1 REGISTRAR OPERACIONES DESDE BROKER (TRADES EN TIEMPO REAL)
+// ============================================================
+
+/**
+ * Sincroniza operaciones abiertas desde el broker con la base de datos.
+ * Se ejecuta en cada ciclo del motor para mantener el dashboard en tiempo real.
+ */
+export async function sincronizarTradesDesdeBroker(
+  accountId: number,
+  userId: number,
+  brokerTrades: BrokerTrade[]
+): Promise<void> {
+  const db = getDb();
+
+  for (const bt of brokerTrades) {
+    // Verificar si ya existe esta operacion
+    const [existente] = await db
+      .select()
+      .from(trades)
+      .where(
+        and(
+          eq(trades.accountId, accountId),
+          eq(trades.brokerTradeId, bt.brokerTradeId)
+        )
+      )
+      .limit(1);
+
+    if (!existente) {
+      // Nueva operacion — registrarla
+      const profitPct =
+        bt.profitLoss !== 0
+          ? ((bt.profitLoss / (bt.entryPrice * bt.lotSize)) * 100).toFixed(4)
+          : "0.0000";
+
+      await db.insert(trades).values({
+        accountId,
+        userId,
+        symbol: bt.symbol,
+        direction: bt.direction,
+        leverage: String(bt.leverage),
+        lotSize: String(bt.lotSize),
+        entryPrice: String(bt.entryPrice),
+        exitPrice: bt.exitPrice ? String(bt.exitPrice) : null,
+        profitLoss: String(bt.profitLoss),
+        profitLossPct: profitPct,
+        resultType: bt.status === "open" ? "open" : bt.profitLoss > 0 ? "win" : bt.profitLoss < 0 ? "loss" : "breakeven",
+        status: bt.status,
+        openedAt: bt.openedAt,
+        closedAt: bt.closedAt || null,
+        brokerTradeId: bt.brokerTradeId,
+        notes: bt.status === "open" ? "Operacion abierta detectada por motor" : "Operacion cerrada detectada por motor",
+      });
+    } else if (existente.status === "open" && bt.status === "closed") {
+      // Operacion que se cerro desde la ultima vez
+      await db
+        .update(trades)
+        .set({
+          status: "closed",
+          exitPrice: bt.exitPrice ? String(bt.exitPrice) : existente.exitPrice,
+          profitLoss: String(bt.profitLoss),
+          profitLossPct: String(
+            bt.profitLoss !== 0
+              ? ((bt.profitLoss / (bt.entryPrice * bt.lotSize)) * 100).toFixed(4)
+              : "0.0000"
+          ),
+          resultType: bt.profitLoss > 0 ? "win" : bt.profitLoss < 0 ? "loss" : "breakeven",
+          closedAt: bt.closedAt || new Date(),
+          notes: "Cerrada por el trader o por el mercado",
+        })
+        .where(eq(trades.id, existente.id));
+    } else if (existente.status === "open" && bt.status === "open") {
+      // Operacion abierta, actualizar P&L en tiempo real
+      await db
+        .update(trades)
+        .set({
+          profitLoss: String(bt.profitLoss),
+          profitLossPct: String(
+            bt.profitLoss !== 0
+              ? ((bt.profitLoss / (bt.entryPrice * bt.lotSize)) * 100).toFixed(4)
+              : "0.0000"
+          ),
+        })
+        .where(eq(trades.id, existente.id));
+    }
+  }
+}
+
+/**
+ * Marca todas las operaciones abiertas como cerradas por proteccion.
+ * Se ejecuta cuando el motor cierra posiciones por limite o trailing.
+ */
+async function cerrarTradesPorProteccion(
+  accountId: number,
+  motivo: "daily_limit" | "weekly_limit" | "monthly_limit" | "trailing_stop",
+  config: ConfigCliente
+): Promise<void> {
+  const db = getDb();
+
+  // Obtener trades abiertas
+  const tradesAbiertas = await db
+    .select()
+    .from(trades)
+    .where(
+      and(
+        eq(trades.accountId, accountId),
+        eq(trades.status, "open")
+      )
+    );
+
+  const now = new Date();
+
+  for (const trade of tradesAbiertas) {
+    const resultType =
+      motivo === "trailing_stop" ? "trailing_protection" : "limit_protection";
+
+    await db
+      .update(trades)
+      .set({
+        status: "closed",
+        resultType,
+        closedAt: now,
+        protectionTrigger: motivo,
+        notes:
+          motivo === "trailing_stop"
+            ? `Cerrada por Guardian Trailing. Plan: ${config.tipoPlan}. Proteccion: ${config.trailingProteccionPct}%`
+            : `Cerrada por limite de proteccion: ${motivo}. Plan: ${config.tipoPlan}`,
+      })
+      .where(eq(trades.id, trade.id));
+  }
+}
+
+// ============================================================
 // 9. CICLO PRINCIPAL DEL MOTOR
 // ============================================================
 
@@ -373,20 +535,25 @@ export async function ejecutarCicloMotor(accountId: number): Promise<void> {
       return;
     }
 
-    // 9.2 Obtener datos del broker
+    // 9.2 Obtener datos del broker (incluye trades actuales)
     const datosBroker = await obtenerDatosBroker(accountId);
 
-    // 9.3 Calcular limites
+    // 9.3 Sincronizar operaciones en tiempo real para el dashboard
+    if (datosBroker.trades.length > 0) {
+      await sincronizarTradesDesdeBroker(accountId, config.userId, datosBroker.trades);
+    }
+
+    // 9.4 Calcular limites
     const limites = calcularLimites(config);
 
-    // 9.4 Revisar limites fijos (siempre)
+    // 9.5 Revisar limites fijos (siempre)
     const alertaFija = revisarLimitesFijos(datosBroker, limites, config);
     if (alertaFija.debeCerrar) {
       await ejecutarCierre(config, alertaFija);
       return;
     }
 
-    // 9.5 Revisar trailing (solo plan trailing)
+    // 9.6 Revisar trailing (solo plan trailing con trailing activo)
     if (config.tipoPlan === "trailing" && config.trailingActivo) {
       const alertaTrailing = revisarTrailing(datosBroker, config);
       if (alertaTrailing.debeCerrar) {
@@ -395,10 +562,10 @@ export async function ejecutarCicloMotor(accountId: number): Promise<void> {
       }
     }
 
-    // 9.6 Todo bien, actualizar balance
+    // 9.7 Todo bien, actualizar balance
     await actualizarBalance(accountId, datosBroker.balance);
 
-    console.log(`[MOTOR RIESGO] Cuenta ${accountId} OK. Balance: $${datosBroker.balance.toFixed(2)}`);
+    console.log(`[MOTOR RIESGO] Cuenta ${accountId} OK. Plan: ${config.tipoPlan} | Periodo: ${config.periodoDias}d | Balance: $${datosBroker.balance.toFixed(2)}`);
   } catch (error) {
     console.error(`[MOTOR RIESGO] ERROR en cuenta ${accountId}:`, error);
   }

@@ -146,5 +146,50 @@ export const notifications = mysqlTable("notifications", {
   sentAt: timestamp("sentAt").defaultNow().notNull(),
 });
 
+// ─── TRADES (operaciones en tiempo real del trader) ───────────────
+export const trades = mysqlTable("trades", {
+  id: serial("id").primaryKey(),
+  accountId: bigint("accountId", { mode: "number", unsigned: true })
+    .notNull()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  userId: bigint("userId", { mode: "number", unsigned: true })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  symbol: varchar("symbol", { length: 50 }).notNull(), // "EUR/USD", "BTC/USD", "ES1!"
+  direction: mysqlEnum("direction", ["buy", "sell"]).notNull(),
+  leverage: decimal("leverage", { precision: 5, scale: 2 }).default("1.00").notNull(), // Apalancamiento usado
+  lotSize: decimal("lotSize", { precision: 12, scale: 4 }).notNull(), // Tamaño de la posicion
+  entryPrice: decimal("entryPrice", { precision: 15, scale: 5 }).notNull(),
+  exitPrice: decimal("exitPrice", { precision: 15, scale: 5 }), // Null si aun abierta
+  profitLoss: decimal("profitLoss", { precision: 15, scale: 2 }).default("0.00").notNull(), // $ ganado/perdido
+  profitLossPct: decimal("profitLossPct", { precision: 8, scale: 4 }).default("0.0000").notNull(), // % del capital
+  resultType: mysqlEnum("resultType", [
+    "open",           // Aun abierta
+    "win",            // Cerrada en ganancia
+    "loss",           // Cerrada en perdida
+    "breakeven",      // Cerrada en 0
+    "trailing_protection", // Cerrada por trailing stop
+    "limit_protection",    // Cerrada por limite diario/semanal/mensual
+    "manual_close",   // Cerrada manualmente por el trader
+  ]).default("open").notNull(),
+  status: mysqlEnum("status", ["open", "closed"]).default("open").notNull(),
+  openedAt: timestamp("openedAt").defaultNow().notNull(),
+  closedAt: timestamp("closedAt"), // Null si aun abierta
+  protectionTrigger: mysqlEnum("protectionTrigger", [
+    "none",
+    "daily_limit",
+    "weekly_limit",
+    "monthly_limit",
+    "trailing_stop",
+  ]).default("none").notNull(),
+  brokerTradeId: varchar("brokerTradeId", { length: 255 }), // ID de la operacion en el broker
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+});
+
+export type Trade = typeof trades.$inferSelect;
+export type InsertTrade = typeof trades.$inferInsert;
+
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = typeof notifications.$inferInsert;
