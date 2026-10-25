@@ -138,6 +138,7 @@ export const notifications = mysqlTable("notifications", {
     "weekly_reflection",
     "monthly_diploma",
     "subscription_expiring",
+    "auto_unlock",
   ]).notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   message: text("message").notNull(),
