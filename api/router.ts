@@ -4,6 +4,7 @@ import { subscriptionRouter } from "./subscription-router";
 import { adminRouter } from "./admin-router";
 import { guardianoRouter } from "./guardiano-router";
 import { tradeRouter } from "./trade-router";
+import { healthRouter } from "./health-router";
 import { createRouter, publicQuery } from "./middleware";
 
 export const appRouter = createRouter({
@@ -14,6 +15,7 @@ export const appRouter = createRouter({
   admin: adminRouter,
   guardiano: guardianoRouter,
   trade: tradeRouter,
+  health: healthRouter,
 });
 
 export type AppRouter = typeof appRouter;

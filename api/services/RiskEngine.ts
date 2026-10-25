@@ -13,7 +13,6 @@ import {
   notifications,
   trades,
   type Account,
-  type Subscription,
 } from "@db/schema";
 
 // ============================================================
