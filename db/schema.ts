@@ -48,6 +48,7 @@ export const accounts = mysqlTable("accounts", {
   trailingActivationPct: decimal("trailingActivationPct", { precision: 5, scale: 2 }).default("1.00").notNull(),
   trailingProtectionPct: decimal("trailingProtectionPct", { precision: 5, scale: 2 }).default("30.00").notNull(),
   isActive: boolean("isActive").default(true).notNull(),
+  notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
 });
