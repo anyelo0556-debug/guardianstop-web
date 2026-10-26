@@ -18,11 +18,13 @@ import FAQ from "@/sections/FAQ";
 import RiskSimulator from "@/sections/RiskSimulator";
 import QuoteOfDay from "@/sections/QuoteOfDay";
 import Contact from "@/sections/Contact";
+import Brokers from "@/sections/Brokers";
 
 const publicNav = (t: any, lang: string) => [
   { id: "about", label: t.nav.about || "Sobre Nosotros" },
   { id: "how", label: t.nav.how },
   { id: "plans", label: t.nav.plans },
+  { id: "brokers", label: lang === "es" ? "Brokers" : "Brokers" },
   { id: "guardiano", label: "Guardiano" },
   { id: "quiz", label: "Test" },
   { id: "faq", label: "FAQ" },
@@ -123,6 +125,7 @@ export default function HomePage() {
         <section id="vault" className="border-t border-gs-border/40"><Vault /></section>
         <section id="guardiano" className="border-t border-gs-border/40"><Guardiano /></section>
         <section id="plans" className="border-t border-gs-border/40"><Plans /></section>
+        <section id="brokers" className="border-t border-gs-border/40"><Brokers onNavigate={scrollTo} /></section>
         <section id="faq" className="border-t border-gs-border/40"><FAQ /></section>
         <section id="simulator" className="border-t border-gs-border/40"><RiskSimulator /></section>
         <section id="quote" className="border-t border-gs-border/40"><QuoteOfDay /></section>
