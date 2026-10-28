@@ -4,7 +4,7 @@ import {
   Shield, Activity, Wallet, TrendingDown, TrendingUp,
   AlertTriangle, PowerOff, Lock, History, ArrowLeft,
   RefreshCw, Loader2, Settings, Terminal, Play, Zap,
-  Server, Globe, ChevronDown, CheckCircle,
+  Server, Globe, CheckCircle,
 } from "lucide-react";
 
 // ═══════════════════════════════════════════════════════════════
@@ -741,10 +741,6 @@ export default function BrokerPanel() {
   // ═══════════════════════════════════════════════════════════════
   //  RENDER HELPERS
   // ═══════════════════════════════════════════════════════════════
-
-  const dailyLoss = balance ? (balance * protection.dailyLimitPct / 100).toFixed(2) : "0.00";
-  const weeklyLoss = balance ? (balance * protection.weeklyLimitPct / 100).toFixed(2) : "0.00";
-  const monthlyLoss = balance ? (balance * protection.monthlyLimitPct / 100).toFixed(2) : "0.00";
 
   const currentBroker = BROKERS.find((b) => b.id === selectedBroker);
 

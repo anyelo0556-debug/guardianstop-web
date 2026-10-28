@@ -61,7 +61,7 @@ export default function Login() {
             }}
           >
             <Shield className="mr-2 h-4 w-4" />
-            Iniciar sesión con Kimi
+            Iniciar sesión
           </Button>
 
           <p className="mt-4 text-[10px] text-gs-muted/60 text-center">

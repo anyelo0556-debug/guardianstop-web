@@ -274,7 +274,6 @@ export default function DerivDashboard() {
 
   const dailyLoss = balance ? (balance * protection.dailyLimitPct / 100).toFixed(2) : "0.00";
   const weeklyLoss = balance ? (balance * protection.weeklyLimitPct / 100).toFixed(2) : "0.00";
-  const monthlyLoss = balance ? (balance * protection.monthlyLimitPct / 100).toFixed(2) : "0.00";
 
   return (
     <div className="min-h-screen bg-gs-bg text-white">
