@@ -5,6 +5,8 @@ import { adminRouter } from "./admin-router";
 import { guardianoRouter } from "./guardiano-router";
 import { tradeRouter } from "./trade-router";
 import { healthRouter } from "./health-router";
+import { paymentRouter } from "./payment-router";
+import { derivRouter } from "./deriv-router";
 import { createRouter, publicQuery } from "./middleware";
 
 export const appRouter = createRouter({
@@ -16,6 +18,8 @@ export const appRouter = createRouter({
   guardiano: guardianoRouter,
   trade: tradeRouter,
   health: healthRouter,
+  payment: paymentRouter,
+  deriv: derivRouter,
 });
 
 export type AppRouter = typeof appRouter;

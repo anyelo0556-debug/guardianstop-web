@@ -1,12 +1,11 @@
-import { Mail, MessageCircle, Clock, Send } from "lucide-react";
+import { Mail, Clock, Send } from "lucide-react";
 import { useLang } from "@/hooks/useLang";
 
 export default function Contact() {
   const { t } = useLang();
 
   const cards = [
-    { icon: MessageCircle, title: t.contact.whatsapp, val: "+1 (555) 000-0000", sub: t.contact.hoursVal },
-    { icon: Mail, title: t.contact.email, val: "support@guardianstop.com", sub: "24-48h response" },
+    { icon: Mail, title: t.contact.email, val: "soporte-@guardianstop.com", sub: "24-48h response" },
     { icon: Clock, title: t.contact.hours, val: t.contact.hoursVal, sub: "EST timezone" },
   ];
 
@@ -21,8 +20,8 @@ export default function Contact() {
         </p>
       </div>
 
-      {/* 3 horizontal contact cards */}
-      <div className="grid gap-5 lg:grid-cols-3 mb-8">
+      {/* 2 horizontal contact cards */}
+      <div className="grid gap-5 lg:grid-cols-2 mb-8 max-w-3xl mx-auto">
         {cards.map((c, i) => {
           const Icon = c.icon;
           return (

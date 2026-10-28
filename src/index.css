@@ -68,3 +68,40 @@
     @apply bg-card/80 backdrop-blur-md border border-border/60;
   }
 }
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.08); }
+}
+
+@keyframes pulse-glow-delayed {
+  0%, 100% { opacity: 0.3; transform: scale(0.95); }
+  50% { opacity: 0.7; transform: scale(1.05); }
+}
+
+@keyframes shield-shimmer {
+  0% { filter: drop-shadow(0 0 40px rgba(201,168,76,0.2)) drop-shadow(0 0 80px rgba(201,168,76,0.08)); }
+  50% { filter: drop-shadow(0 0 50px rgba(201,168,76,0.35)) drop-shadow(0 0 100px rgba(201,168,76,0.15)); }
+  100% { filter: drop-shadow(0 0 40px rgba(201,168,76,0.2)) drop-shadow(0 0 80px rgba(201,168,76,0.08)); }
+}
+
+@keyframes bounce-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@layer utilities {
+  .animate-pulse-glow {
+    animation: pulse-glow 3s ease-in-out infinite;
+  }
+  .animate-pulse-glow-delayed {
+    animation: pulse-glow-delayed 3s ease-in-out infinite;
+    animation-delay: 1.5s;
+  }
+  .animate-shield-shimmer {
+    animation: shield-shimmer 4s ease-in-out infinite;
+  }
+  .animate-bounce-slow {
+    animation: bounce-slow 2.5s ease-in-out infinite;
+  }
+}

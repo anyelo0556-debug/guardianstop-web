@@ -192,5 +192,59 @@ export const trades = mysqlTable("trades", {
 export type Trade = typeof trades.$inferSelect;
 export type InsertTrade = typeof trades.$inferInsert;
 
+// ─── PAYMENTS (Stripe, PayPal, Crypto) ────────────────────────────
+export const payments = mysqlTable("payments", {
+  id: serial("id").primaryKey(),
+  userId: bigint("userId", { mode: "number", unsigned: true })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  subscriptionId: bigint("subscriptionId", { mode: "number", unsigned: true })
+    .references(() => subscriptions.id, { onDelete: "set null" }),
+  provider: mysqlEnum("provider", ["stripe", "paypal", "crypto_usdc", "crypto_usdt"]).notNull(),
+  providerPaymentId: varchar("providerPaymentId", { length: 255 }), // Stripe session ID, PayPal order ID, crypto tx hash
+  planType: mysqlEnum("planType", ["basic", "trailing"]).notNull(),
+  periodDays: int("periodDays").notNull(), // 30, 90, 180, 365
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 10 }).default("USD").notNull(),
+  status: mysqlEnum("status", ["pending", "completed", "failed", "refunded"]).default("pending").notNull(),
+  paidAt: timestamp("paidAt"),
+  expiresAt: timestamp("expiresAt"),
+  metadata: text("metadata"), // JSON extra data
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+});
+
+export type Payment = typeof payments.$inferSelect;
+export type InsertPayment = typeof payments.$inferInsert;
+
+// ─── PAYPAL PLANS (pre-configured subscription plans) ─────────────
+export const paypalPlans = mysqlTable("paypal_plans", {
+  id: serial("id").primaryKey(),
+  planType: mysqlEnum("planType", ["basic", "trailing"]).notNull(),
+  periodDays: int("periodDays").notNull(),
+  paypalPlanId: varchar("paypalPlanId", { length: 255 }).notNull(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type PaypalPlan = typeof paypalPlans.$inferSelect;
+export type InsertPaypalPlan = typeof paypalPlans.$inferInsert;
+
+// ─── STRIPE PRODUCTS (pre-configured products/prices) ─────────────
+export const stripePrices = mysqlTable("stripe_prices", {
+  id: serial("id").primaryKey(),
+  planType: mysqlEnum("planType", ["basic", "trailing"]).notNull(),
+  periodDays: int("periodDays").notNull(),
+  stripePriceId: varchar("stripePriceId", { length: 255 }).notNull(),
+  stripeProductId: varchar("stripeProductId", { length: 255 }).notNull(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type StripePrice = typeof stripePrices.$inferSelect;
+export type InsertStripePrice = typeof stripePrices.$inferInsert;
+
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = typeof notifications.$inferInsert;

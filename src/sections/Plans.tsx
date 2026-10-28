@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useLang } from "@/hooks/useLang";
 import { useState } from "react";
+import PaymentModal from "@/components/PaymentModal";
 
 const pricing = {
   basic: [
@@ -23,8 +24,15 @@ const pricing = {
 export default function Plans() {
   const { lang, t } = useLang();
   const [mode, setMode] = useState<"basic" | "trailing">("trailing");
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<{ days: number; price: number } | null>(null);
 
   const plans = pricing[mode];
+
+  const openPayment = (plan: { days: number; price: number }) => {
+    setSelectedPlan(plan);
+    setPaymentOpen(true);
+  };
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-20 md:py-28">
@@ -156,6 +164,7 @@ export default function Plans() {
               </div>
 
               <Button
+                onClick={() => openPayment(plan)}
                 className={`w-full mt-auto rounded-full text-xs font-bold tracking-wide ${
                   plan.popular
                     ? "bg-gs-gold text-gs-bg hover:bg-gs-gold-light"
@@ -168,6 +177,17 @@ export default function Plans() {
           </Card>
         ))}
       </div>
+
+      {/* Payment Modal */}
+      {selectedPlan && (
+        <PaymentModal
+          isOpen={paymentOpen}
+          onClose={() => setPaymentOpen(false)}
+          planType={mode}
+          periodDays={selectedPlan.days}
+          price={String(selectedPlan.price)}
+        />
+      )}
     </div>
   );
 }

@@ -34,16 +34,21 @@ export default function Hero({ onNavigate }: { onNavigate: (id: string) => void 
             </div>
           </div>
 
-          {/* RIGHT: Large Shield — MÁS GRANDE */}
-          <div className="flex items-center justify-center order-1 lg:order-2">
-            <div className="relative">
-              <div className="absolute inset-0 rounded-full bg-gs-gold/[0.06] blur-[100px] scale-125" />
-              <img
-                src="/logo-shield.png"
-                alt="Guardian Stop"
-                className="relative h-80 w-auto md:h-[420px] lg:h-[480px] object-contain drop-shadow-[0_0_80px_rgba(201,168,76,0.2)]"
-              />
+          {/* RIGHT: Shield watermark — integrated, no border, larger, glowing */}
+          <div className="flex items-center justify-center order-1 lg:order-2 relative">
+            {/* Animated glow layers behind shield */}
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div className="absolute h-[300px] w-[300px] md:h-[400px] md:w-[400px] lg:h-[480px] lg:w-[480px] rounded-full bg-gs-gold/10 blur-[80px] animate-pulse-glow" />
+              <div className="absolute h-[200px] w-[200px] md:h-[280px] md:w-[280px] lg:h-[340px] lg:w-[340px] rounded-full bg-gs-gold/20 blur-[50px] animate-pulse-glow-delayed" />
             </div>
+            <img
+              src="/logo-full.png"
+              alt="Guardian Stop"
+              className="relative h-96 w-auto md:h-[480px] lg:h-[560px] object-contain opacity-95 animate-shield-shimmer"
+              style={{
+                filter: 'drop-shadow(0 0 40px rgba(201,168,76,0.25)) drop-shadow(0 0 80px rgba(201,168,76,0.1))',
+              }}
+            />
           </div>
         </div>
 

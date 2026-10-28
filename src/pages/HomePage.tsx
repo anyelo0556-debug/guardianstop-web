@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
+import { Link } from "react-router";
 import {
   Menu,
   Globe,
@@ -9,16 +10,19 @@ import { useLang } from "@/hooks/useLang";
 import Hero from "@/sections/Hero";
 import About from "@/sections/About";
 import WhoIsItFor from "@/sections/WhoIsItFor";
-import MindsetQuiz from "@/sections/MindsetQuiz";
 import HowItWorks from "@/sections/HowItWorks";
-import Vault from "@/sections/Vault";
-import Guardiano from "@/sections/Guardiano";
 import Plans from "@/sections/Plans";
-import FAQ from "@/sections/FAQ";
-import RiskSimulator from "@/sections/RiskSimulator";
-import QuoteOfDay from "@/sections/QuoteOfDay";
-import Contact from "@/sections/Contact";
-import Brokers from "@/sections/Brokers";
+// import CandleBackground from "@/components/CandleBackground";
+import GuardianoFAB from "@/components/GuardianoFAB";
+
+const MindsetQuiz = lazy(() => import("@/sections/MindsetQuiz"));
+const Vault = lazy(() => import("@/sections/Vault"));
+const Guardiano = lazy(() => import("@/sections/Guardiano"));
+const FAQ = lazy(() => import("@/sections/FAQ"));
+const RiskSimulator = lazy(() => import("@/sections/RiskSimulator"));
+const QuoteOfDay = lazy(() => import("@/sections/QuoteOfDay"));
+const Contact = lazy(() => import("@/sections/Contact"));
+const Brokers = lazy(() => import("@/sections/Brokers"));
 
 const publicNav = (t: any, lang: string) => [
   { id: "about", label: t.nav.about || "Sobre Nosotros" },
@@ -46,6 +50,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-gs-bg text-gs-text font-body selection:bg-gs-gold/30">
+      {/* <CandleBackground /> */}
       <header className="fixed top-0 left-0 right-0 z-50 border-b border-gs-border/40 bg-gs-bg/95 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
           <span className="text-lg font-bold tracking-[0.12em] text-gs-gold font-display cursor-pointer" onClick={() => scrollTo("hero")}>
@@ -120,16 +125,22 @@ export default function HomePage() {
         <section id="hero"><Hero onNavigate={scrollTo} /></section>
         <section id="about" className="border-t border-gs-border/40"><About /></section>
         <section id="who" className="border-t border-gs-border/40"><WhoIsItFor /></section>
-        <section id="quiz" className="border-t border-gs-border/40"><MindsetQuiz /></section>
+        <Suspense fallback={<div className="h-40" />}>
+          <section id="quiz" className="border-t border-gs-border/40"><MindsetQuiz /></section>
+        </Suspense>
         <section id="how" className="border-t border-gs-border/40"><HowItWorks /></section>
-        <section id="vault" className="border-t border-gs-border/40"><Vault /></section>
-        <section id="guardiano" className="border-t border-gs-border/40"><Guardiano /></section>
+        <Suspense fallback={<div className="h-40" />}>
+          <section id="vault" className="border-t border-gs-border/40"><Vault /></section>
+          <section id="guardiano" className="border-t border-gs-border/40"><Guardiano /></section>
+        </Suspense>
         <section id="plans" className="border-t border-gs-border/40"><Plans /></section>
-        <section id="brokers" className="border-t border-gs-border/40"><Brokers onNavigate={scrollTo} /></section>
-        <section id="faq" className="border-t border-gs-border/40"><FAQ /></section>
-        <section id="simulator" className="border-t border-gs-border/40"><RiskSimulator /></section>
-        <section id="quote" className="border-t border-gs-border/40"><QuoteOfDay /></section>
-        <section id="contact" className="border-t border-gs-border/40"><Contact /></section>
+        <Suspense fallback={<div className="h-40" />}>
+          <section id="brokers" className="border-t border-gs-border/40"><Brokers /></section>
+          <section id="faq" className="border-t border-gs-border/40"><FAQ /></section>
+          <section id="simulator" className="border-t border-gs-border/40"><RiskSimulator /></section>
+          <section id="quote" className="border-t border-gs-border/40"><QuoteOfDay /></section>
+          <section id="contact" className="border-t border-gs-border/40"><Contact /></section>
+        </Suspense>
       </main>
 
       <footer className="border-t border-gs-border/40 bg-gs-bg py-10">
@@ -138,6 +149,13 @@ export default function HomePage() {
             <p className="tracking-widest text-gs-gold font-display text-xl mb-3">
               GUARDIAN STOP
             </p>
+            <div className="flex items-center gap-4 mb-4">
+              <Link to="/privacy" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Privacidad</Link>
+              <span className="text-gs-border">|</span>
+              <Link to="/architecture" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Arquitectura Técnica</Link>
+              <span className="text-gs-border">|</span>
+              <Link to="/deriv" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Panel Deriv</Link>
+            </div>
             <p className="max-w-3xl text-[10px] text-gs-muted font-mono leading-relaxed mb-4 opacity-70">
               {t.footer.disclaimer}
             </p>
@@ -145,6 +163,9 @@ export default function HomePage() {
           </div>
         </div>
       </footer>
+
+      {/* Floating Guardiano chat button */}
+      <GuardianoFAB />
     </div>
   );
 }
