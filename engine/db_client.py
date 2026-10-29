@@ -52,32 +52,32 @@ def _conn():
 # ── ACCOUNT CONFIG ──────────────────────────────────────────────
 
 def get_active_accounts() -> List[Dict]:
-    """Fetch all active trading accounts with broker credentials."""
+    """Fetch all active trading accounts with broker credentials.
+    Reads from account_credentials; if no linked account, uses defaults."""
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    a.id AS account_id,
-                    a.user_id,
-                    a.broker_name,
-                    a.account_number,
-                    a.account_type,
-                    a.initial_capital,
-                    a.current_balance,
-                    a.daily_limit_pct,
-                    a.weekly_limit_pct,
-                    a.monthly_limit_pct,
-                    a.trailing_enabled,
-                    a.trailing_activation_pct,
-                    a.trailing_protection_pct,
-                    a.is_active,
-                    ac.ig_api_key,
-                    ac.ig_identifier,
-                    ac.ig_password,
-                    ac.deriv_api_token
-                FROM accounts a
-                LEFT JOIN account_credentials ac ON ac.account_id = a.id
-                WHERE a.is_active = 1
+                    ac.accountId,
+                    COALESCE(a.userId, 1) AS userId,
+                    COALESCE(a.brokerName, 'ig') AS brokerName,
+                    COALESCE(a.accountNumber, '') AS accountNumber,
+                    COALESCE(a.accountType, 'demo') AS accountType,
+                    COALESCE(a.initialCapital, 10000) AS initialCapital,
+                    COALESCE(a.currentBalance, 10000) AS currentBalance,
+                    COALESCE(a.dailyLimitPct, 1.0) AS dailyLimitPct,
+                    COALESCE(a.weeklyLimitPct, 10.0) AS weeklyLimitPct,
+                    COALESCE(a.monthlyLimitPct, 30.0) AS monthlyLimitPct,
+                    COALESCE(a.trailingEnabled, 0) AS trailingEnabled,
+                    COALESCE(a.trailingActivationPct, 1.0) AS trailingActivationPct,
+                    COALESCE(a.trailingProtectionPct, 30.0) AS trailingProtectionPct,
+                    COALESCE(a.isActive, 1) AS isActive,
+                    ac.igApiKey,
+                    ac.igIdentifier,
+                    ac.igPassword,
+                    ac.derivApiToken
+                FROM account_credentials ac
+                LEFT JOIN accounts a ON a.id = ac.accountId
             """)
             return cur.fetchall()
 
@@ -90,14 +90,14 @@ def ensure_credentials_table():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS account_credentials (
                     id INT AUTO_INCREMENT PRIMARY KEY,
-                    account_id BIGINT UNSIGNED NOT NULL,
-                    ig_api_key VARCHAR(255),
-                    ig_identifier VARCHAR(100),
-                    ig_password TEXT,
-                    deriv_api_token VARCHAR(255),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    UNIQUE KEY (account_id)
+                    accountId BIGINT UNSIGNED NOT NULL,
+                    igApiKey VARCHAR(255),
+                    igIdentifier VARCHAR(100),
+                    igPassword TEXT,
+                    derivApiToken VARCHAR(255),
+                    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY (accountId)
                 )
             """)
 
@@ -125,10 +125,10 @@ def insert_trade(
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO trades (
-                    account_id, user_id, symbol, direction, lot_size,
-                    entry_price, exit_price, profit_loss, profit_loss_pct,
-                    result_type, status, opened_at, closed_at,
-                    protection_trigger, broker_trade_id, notes
+                    accountId, userId, symbol, direction, lotSize,
+                    entryPrice, exitPrice, profitLoss, profitLossPct,
+                    resultType, status, openedAt, closedAt,
+                    protectionTrigger, brokerTradeId, notes
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 account_id, user_id, symbol, direction, lot_size,
@@ -151,15 +151,15 @@ def update_trade_closed(
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE trades SET
-                    exit_price = %s,
-                    profit_loss = %s,
-                    profit_loss_pct = %s,
-                    result_type = %s,
+                    exitPrice = %s,
+                    profitLoss = %s,
+                    profitLossPct = %s,
+                    resultType = %s,
                     status = 'closed',
-                    closed_at = NOW(),
-                    protection_trigger = %s,
+                    closedAt = NOW(),
+                    protectionTrigger = %s,
                     notes = %s,
-                    updated_at = NOW()
+                    updatedAt = NOW()
                 WHERE id = %s
             """, (exit_price, profit_loss, profit_loss_pct, result_type, protection_trigger, notes, trade_id))
 
@@ -178,9 +178,9 @@ def insert_protection_log(
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO protection_logs (
-                    account_id, user_id, trigger_type,
-                    profit_loss_at_trigger, profit_loss_pct_at_trigger,
-                    protected_amount, notes
+                    accountId, userId, triggerType,
+                    profitLossAtTrigger, profitLossPctAtTrigger,
+                    protectedAmount, notes
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 account_id, user_id, trigger_type,
@@ -195,7 +195,7 @@ def update_account_balance(account_id: int, balance: float) -> None:
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE accounts SET current_balance = %s, updated_at = NOW() WHERE id = %s",
+                "UPDATE accounts SET currentBalance = %s, updatedAt = NOW() WHERE id = %s",
                 (balance, account_id),
             )
 
@@ -210,7 +210,7 @@ def insert_notification(
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO notifications (user_id, type, title, message)
+                INSERT INTO notifications (userId, type, title, message)
                 VALUES (%s, %s, %s, %s)
             """, (user_id, notif_type, title, message))
             return cur.lastrowid

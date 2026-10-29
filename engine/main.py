@@ -41,24 +41,24 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 class AccountMonitor:
     def __init__(self, account: Dict):
-        self.account_id = account["account_id"]
-        self.user_id = account["user_id"]
-        self.broker_name = account["broker_name"]
-        self.account_number = account["account_number"]
-        self.account_type = account["account_type"]
-        self.initial_balance = float(account["initial_capital"]) if account["initial_capital"] else 0
-        self.daily_limit_pct = float(account["daily_limit_pct"]) if account["daily_limit_pct"] else 1.0
-        self.weekly_limit_pct = float(account["weekly_limit_pct"]) if account["weekly_limit_pct"] else 10.0
-        self.monthly_limit_pct = float(account["monthly_limit_pct"]) if account["monthly_limit_pct"] else 30.0
-        self.trailing_enabled = bool(account["trailing_enabled"])
-        self.trailing_activation_pct = float(account["trailing_activation_pct"]) if account["trailing_activation_pct"] else 1.0
-        self.trailing_protection_pct = float(account["trailing_protection_pct"]) if account["trailing_protection_pct"] else 30.0
+        self.account_id = account["accountId"]
+        self.user_id = account["userId"]
+        self.broker_name = account["brokerName"]
+        self.account_number = account["accountNumber"]
+        self.account_type = account["accountType"]
+        self.initial_balance = float(account["initialCapital"]) if account["initialCapital"] else 0
+        self.daily_limit_pct = float(account["dailyLimitPct"]) if account["dailyLimitPct"] else 1.0
+        self.weekly_limit_pct = float(account["weeklyLimitPct"]) if account["weeklyLimitPct"] else 10.0
+        self.monthly_limit_pct = float(account["monthlyLimitPct"]) if account["monthlyLimitPct"] else 30.0
+        self.trailing_enabled = bool(account["trailingEnabled"])
+        self.trailing_activation_pct = float(account["trailingActivationPct"]) if account["trailingActivationPct"] else 1.0
+        self.trailing_protection_pct = float(account["trailingProtectionPct"]) if account["trailingProtectionPct"] else 30.0
 
         # Broker credentials
-        self.ig_api_key = account.get("ig_api_key", "") or ""
-        self.ig_identifier = account.get("ig_identifier", "") or ""
-        self.ig_password = account.get("ig_password", "") or ""
-        self.deriv_api_token = account.get("deriv_api_token", "") or ""
+        self.ig_api_key = account.get("igApiKey", "") or ""
+        self.ig_identifier = account.get("igIdentifier", "") or ""
+        self.ig_password = account.get("igPassword", "") or ""
+        self.deriv_api_token = account.get("derivApiToken", "") or ""
 
         # Runtime state
         self.client: Optional[object] = None

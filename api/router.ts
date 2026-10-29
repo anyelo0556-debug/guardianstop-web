@@ -8,6 +8,7 @@ import { healthRouter } from "./health-router";
 import { paymentRouter } from "./payment-router";
 import { derivRouter } from "./deriv-router";
 import { igRouter } from "./ig-router";
+import { credentialsRouter } from "./credentials-router";
 import { createRouter, publicQuery } from "./middleware";
 
 export const appRouter = createRouter({
@@ -22,6 +23,7 @@ export const appRouter = createRouter({
   payment: paymentRouter,
   deriv: derivRouter,
   ig: igRouter,
+  credentials: credentialsRouter,
 });
 
 export type AppRouter = typeof appRouter;

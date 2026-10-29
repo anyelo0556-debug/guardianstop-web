@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Link } from "react-router";
+import { trpc } from "@/providers/trpc";
 import {
   Shield, Activity, Wallet, TrendingDown, TrendingUp,
   AlertTriangle, PowerOff, Lock, History, ArrowLeft,
@@ -254,6 +255,9 @@ export default function BrokerPanel() {
     const interval = setInterval(() => setTradingDayTick(Date.now()), 60000); // every minute
     return () => clearInterval(interval);
   }, []);
+
+  // ─── tRPC: save credentials for Risk Engine ───────────────────
+  const saveCredentials = trpc.credentials.save.useMutation();
 
   // ═══════════════════════════════════════════════════════════════
   //  DERIV CONNECTION
@@ -627,6 +631,20 @@ export default function BrokerPanel() {
       // Use account from response if user didn't specify
       if (!igAccountId && session?.accountId) {
         setIgAccountId(session.accountId);
+      }
+
+      // Save credentials for Python Risk Engine (accountId=1 for now)
+      try {
+        saveCredentials.mutate({
+          accountId: 1,
+          broker: "ig",
+          igApiKey,
+          igIdentifier: igUsername,
+          igPassword,
+        });
+        addRaw("[CREDENTIALS] Saved to Risk Engine");
+      } catch (e: any) {
+        addRaw(`[CREDENTIALS] Save failed: ${e.message}`);
       }
 
       await igFetchData();

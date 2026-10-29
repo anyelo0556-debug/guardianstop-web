@@ -56,6 +56,23 @@ export const accounts = mysqlTable("accounts", {
 export type Account = typeof accounts.$inferSelect;
 export type InsertAccount = typeof accounts.$inferInsert;
 
+// ─── ACCOUNT CREDENTIALS (for Risk Engine) ────────────────────────
+export const accountCredentials = mysqlTable("account_credentials", {
+  id: serial("id").primaryKey(),
+  accountId: bigint("accountId", { mode: "number", unsigned: true })
+    .notNull()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  igApiKey: varchar("igApiKey", { length: 255 }),
+  igIdentifier: varchar("igIdentifier", { length: 100 }),
+  igPassword: text("igPassword"),
+  derivApiToken: varchar("derivApiToken", { length: 255 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+});
+
+export type AccountCredential = typeof accountCredentials.$inferSelect;
+export type InsertAccountCredential = typeof accountCredentials.$inferInsert;
+
 // ─── SUBSCRIPTIONS ────────────────────────────────────────────────
 export const subscriptions = mysqlTable("subscriptions", {
   id: serial("id").primaryKey(),
