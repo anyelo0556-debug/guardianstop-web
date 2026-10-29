@@ -686,14 +686,7 @@ export default function BrokerPanel() {
     const myGen = connGenRef.current;
     const isStale = () => connGenRef.current !== myGen;
 
-    // Force reset if stuck for more than 15 seconds
-    const elapsed = Date.now() - closeStartTimeRef.current;
-    if (isClosingRef.current && elapsed > 15000) {
-      addRaw(`[CLOSE FORCE RESET] isClosing stuck for ${elapsed}ms, forcing reset`);
-      setIsClosing(false);
-      isClosingRef.current = false;
-    }
-
+    // ─── GUARD: prevent re-entry ──────────────────────────────
     if (!isConnected || positions.length === 0 || isClosingRef.current) {
       addRaw(`[CLOSE SKIP] isConnected=${isConnected}, positions=${positions.length}, isClosing=${isClosingRef.current}`);
       return;
@@ -705,17 +698,18 @@ export default function BrokerPanel() {
     setIsClosing(true);
     isClosingRef.current = true;
     closeStartTimeRef.current = Date.now();
-    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, totalPnL=${totalPnL.toFixed(2)}, isClosing=true`);
+    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, totalPnL=${totalPnL.toFixed(2)}`);
 
-    // Hard safety: force reset isClosing after 15 seconds no matter what
-    const hardResetTimeout = setTimeout(() => {
-      if (connGenRef.current !== myGen) return; // stale, don't touch
-      if (isClosingRef.current) {
-        addRaw("[CLOSE HARD RESET] 15s timeout reached, forcing isClosing=false");
+    // ─── ALWAYS reset isClosing when done ─────────────────────
+    const cleanup = () => {
+      if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
+      closingTimeoutRef.current = setTimeout(() => {
+        if (connGenRef.current !== myGen) return; // stale session
         setIsClosing(false);
         isClosingRef.current = false;
-      }
-    }, 15000);
+        addRaw("[CLOSE] isClosing reseteado");
+      }, 2000);
+    };
 
     try {
       if (isDemo) {
@@ -728,20 +722,19 @@ export default function BrokerPanel() {
       if (selectedBroker === "deriv") {
         let closed = 0;
         for (const pos of positions) {
-          if (isStale()) return;
+          if (isStale()) { addRaw("[CLOSE ABORT] stale session (deriv)"); return; }
           try {
             wsRef.current?.send(JSON.stringify({ sell: pos.id, price: 0, req_id: reqIdRef.current++ }));
             closed++;
           } catch { /* ignore */ }
         }
-        if (isStale()) return;
         addLog("CIERRE", `Cerradas ${closed} posiciones por ${trigger}`);
         setTimeout(refreshData, 1000);
       } else if (selectedBroker === "ig") {
         let closed = 0;
         let failed = 0;
         for (const pos of positions) {
-          if (isStale()) return;
+          if (isStale()) { addRaw("[CLOSE ABORT] stale session (ig loop)"); return; }
           let attempt = 0;
           let success = false;
           const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
@@ -763,7 +756,7 @@ export default function BrokerPanel() {
             try {
               addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | body=${JSON.stringify(closeBody)}`);
               const result = await igRequest("/positions/otc", "DELETE", closeBody);
-              if (isStale()) return;
+              if (isStale()) { addRaw("[CLOSE ABORT] stale after IG response"); return; }
               addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 200)}`);
               closed++;
               success = true;
@@ -771,8 +764,8 @@ export default function BrokerPanel() {
               addRaw(`[IG CLOSE FAIL v${attempt}] ${pos.symbol}: ${e.message}`);
               // If dealId failed, try with epic+expiry on next attempt
               if (attempt === 1 && pos.dealId) {
-                addRaw(`[IG CLOSE FALLBACK] Intentando con epic+expiry en vez de dealId...`);
-                const fallbackBody: any = {
+                addRaw(`[IG CLOSE FALLBACK] Intentando con epic+expiry...`);
+                closeBody = {
                   direction: closeDirection,
                   size: pos.size,
                   orderType: "MARKET",
@@ -780,7 +773,6 @@ export default function BrokerPanel() {
                   epic: pos.epic || pos.symbol,
                   expiry: pos.expiry || "-",
                 };
-                closeBody = fallbackBody;
               }
               if (attempt < 3) {
                 addRaw(`[IG CLOSE RETRY] ${pos.symbol} en 1s...`);
@@ -791,21 +783,13 @@ export default function BrokerPanel() {
             }
           }
         }
-        if (isStale()) return;
         addLog("CIERRE", `Cerradas ${closed}/${positions.length} posiciones por ${trigger} (${failed} fallos)`);
         setTimeout(refreshData, 3000);
       }
+    } catch (e: any) {
+      addRaw(`[CLOSE ERROR] ${e.message}`);
     } finally {
-      clearTimeout(hardResetTimeout);
-      if (isStale()) return; // don't reset isClosing if stale
-      // Reset isClosing immediately (or after short delay for UI feedback)
-      if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
-      closingTimeoutRef.current = setTimeout(() => {
-        if (connGenRef.current !== myGen) return;
-        setIsClosing(false);
-        isClosingRef.current = false;
-        addRaw("[CLOSE] isClosing reseteado");
-      }, 2000);
+      cleanup();
     }
   }, [isConnected, positions, isDemo, selectedBroker, totalPnL, addLog, addRaw, refreshData, igRequest]);
 
@@ -865,29 +849,25 @@ export default function BrokerPanel() {
       return false;
     }
 
-    // 1. DAILY DRAWDOWN LIMIT — uses ONLY realized losses from closed trades
+    // GUARD: skip if already closing
+    if (isClosingRef.current || positions.length === 0) return false;
+
+    // 1. DAILY LIMIT — uses ONLY realized losses from closed trades
     if (initialBalance && balance !== null) {
       const dailyLimit = initialBalance * (protection.dailyLimitPct / 100);
-      addRaw(`[PROTECTION CHECK] Daily Limit: realizedDailyLoss=${realizedDailyLoss.toFixed(2)}, dailyLimit=${dailyLimit.toFixed(2)}, positions=${positions.length}`);
-      if (realizedDailyLoss >= dailyLimit && positions.length > 0) {
+      if (realizedDailyLoss >= dailyLimit) {
         addLog("PROTECCIÓN", `Límite diario alcanzado: pérdida realizada ${realizedDailyLoss.toFixed(2)} >= ${dailyLimit.toFixed(2)} ${currency}. Cerrando todo.`);
         executeCloseAll("LÍMITE DIARIO");
         return true;
       }
-    } else {
-      addRaw(`[PROTECTION CHECK] SKIP: initialBalance=${initialBalance}, balance=${balance}`);
     }
 
     // 2. TRAILING STOP
     if (protection.trailingEnabled && !trailingFired) {
       const threshold = balance ? balance * 0.01 : 0;
-      const isActive = totalPnL >= threshold;
-      addRaw(`[PROTECTION CHECK] Trailing: threshold=${threshold.toFixed(2)}, totalPnL=${totalPnL.toFixed(2)}, isActive=${isActive}, peakPnL=${peakPnL.toFixed(2)}`);
-      if (isActive && peakPnL > 0) {
+      if (totalPnL >= threshold && peakPnL > 0) {
         const stopLevel = peakPnL * (protection.trailingProtectPct / 100);
-        const isTriggered = totalPnL <= stopLevel;
-        addRaw(`[PROTECTION CHECK] Trailing: stopLevel=${stopLevel.toFixed(2)}, isTriggered=${isTriggered}`);
-        if (isTriggered && positions.length > 0) {
+        if (totalPnL <= stopLevel) {
           setTrailingFired(true);
           addLog("PROTECCIÓN", `Trailing Stop activado: ganancias cayeron de +${peakPnL.toFixed(2)} a +${totalPnL.toFixed(2)} ${currency}. Cerrando todo.`);
           executeCloseAll("TRAILING STOP");
