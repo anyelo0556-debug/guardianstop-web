@@ -154,7 +154,7 @@ export default function HomePage() {
               <span className="text-gs-border">|</span>
               <Link to="/architecture" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Arquitectura Técnica</Link>
               <span className="text-gs-border">|</span>
-              <Link to="/deriv" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Panel Deriv</Link>
+              <Link to="/panel" className="text-[10px] text-gs-muted hover:text-gs-gold transition-colors">Panel</Link>
             </div>
             <p className="max-w-3xl text-[10px] text-gs-muted font-mono leading-relaxed mb-4 opacity-70">
               {t.footer.disclaimer}

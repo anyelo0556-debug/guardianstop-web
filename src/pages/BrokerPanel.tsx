@@ -60,6 +60,9 @@ interface Position {
   currentPrice?: number;
   profit: number;
   profitPct: number;
+  dealId?: string;
+  epic?: string;
+  expiry?: string;
 }
 
 interface ProtectionLog {
@@ -144,6 +147,9 @@ export default function BrokerPanel() {
   const igSessionRef = useRef<IGSession | null>(null);
   const igRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const igPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevPositionsCountRef = useRef<number>(0);
+  const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeStartTimeRef = useRef<number>(0);
 
   // ─── Helpers ────────────────────────────────────────────────
   const addLog = useCallback((action: string, message: string) => {
@@ -310,7 +316,55 @@ export default function BrokerPanel() {
   //  IG CONNECTION (OAuth 2.0 REST API)
   // ═══════════════════════════════════════════════════════════════
 
-  const igRequest = useCallback(async (path: string, method: string, body?: any) => {
+  // Standalone IG login (used by connectIG and by igRequest for auto-reconnect)
+  const igLogin = useCallback(async (): Promise<boolean> => {
+    try {
+      const isDemoEnv = selectedEnv === "demo";
+      const host = isDemoEnv ? "demo-api.ig.com" : "api.ig.com";
+
+      const sessionRes = await fetch(`https://${host}/gateway/deal/session`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-IG-API-KEY": igApiKey,
+          "Version": "2",
+        },
+        body: JSON.stringify({
+          identifier: igUsername,
+          password: igPassword,
+          encryptedPassword: false,
+        }),
+      });
+
+      const sessionText = await sessionRes.text();
+      if (!sessionRes.ok) {
+        addRaw(`[IG RELOGIN FAIL] HTTP ${sessionRes.status}: ${sessionText.slice(0, 200)}`);
+        return false;
+      }
+
+      const cst = sessionRes.headers.get("CST") || sessionRes.headers.get("cst") || "";
+      const xst = sessionRes.headers.get("X-SECURITY-TOKEN") || sessionRes.headers.get("x-security-token") || "";
+      const sessionData = JSON.parse(sessionText);
+      const oauth = sessionData.oauthToken || {};
+
+      igSessionRef.current = {
+        cst: cst || "fallback",
+        xSecurityToken: xst || "fallback",
+        access_token: oauth.access_token,
+        refresh_token: oauth.refresh_token,
+        accountId: sessionData.accountId || igAccountId || "",
+        clientId: String(sessionData.clientId || ""),
+      };
+
+      addRaw(`[IG RELOGIN OK] CST=${cst ? "yes" : "no"}, XST=${xst ? "yes" : "no"}`);
+      return true;
+    } catch (e: any) {
+      addRaw(`[IG RELOGIN ERROR] ${e.message}`);
+      return false;
+    }
+  }, [igApiKey, igUsername, igPassword, selectedEnv, igAccountId, addRaw]);
+
+  const igRequest = useCallback(async (path: string, method: string, body?: any, attempt: number = 1): Promise<any> => {
     const session = igSessionRef.current;
     if (!session) throw new Error("No hay sesión activa");
 
@@ -326,7 +380,7 @@ export default function BrokerPanel() {
       "Version": "1",
     };
 
-    addRaw(`[IG REQ] ${method} ${path}`);
+    addRaw(`[IG REQ] ${method} ${path} (attempt ${attempt})`);
 
     const res = await fetch(url, {
       method,
@@ -335,12 +389,26 @@ export default function BrokerPanel() {
     });
 
     const text = await res.text();
+
+    // Handle session expiry — auto re-authenticate and retry once
+    if (res.status === 401 || text.includes("error.security.invalid-details") || text.includes("error.security.api-key-missing")) {
+      addRaw(`[IG SESSION EXPIRED] ${res.status}: ${text.slice(0, 200)}`);
+      if (attempt <= 1) {
+        addRaw("[IG] Attempting auto re-login...");
+        const reconnected = await igLogin();
+        if (reconnected) {
+          addRaw("[IG] Re-login successful, retrying request...");
+          return igRequest(path, method, body, attempt + 1);
+        }
+      }
+    }
+
     if (!res.ok) {
-      throw new Error(`IG HTTP ${res.status}: ${text.slice(0, 200)}`);
+      throw new Error(`IG HTTP ${res.status}: ${text.slice(0, 300)}`);
     }
 
     return text ? JSON.parse(text) : {};
-  }, [igApiKey, selectedEnv, addRaw]);
+  }, [igApiKey, selectedEnv, addRaw, igLogin]);
 
   const igRefreshSession = useCallback(async () => {
     const session = igSessionRef.current;
@@ -449,7 +517,7 @@ export default function BrokerPanel() {
         runningPnL += profit;
         addRaw(`[IG POS] ${market.instrumentName || market.epic} | ${direction} ${size} @ ${openPrice.toFixed(2)} | Now: ${currentPrice.toFixed(2)} | P&L: ${profit.toFixed(2)}`);
         return {
-          id: pos.dealId || String(Math.random()),
+          id: pos.dealId || pos.dealReference || String(Math.random()),
           symbol: market.instrumentName || market.epic || "UNKNOWN",
           direction,
           size,
@@ -457,6 +525,9 @@ export default function BrokerPanel() {
           currentPrice,
           profit,
           profitPct,
+          dealId: pos.dealId || "",
+          epic: market.epic || "",
+          expiry: market.expiry || "-",
         };
       });
       setPositions(mappedPositions);
@@ -477,63 +548,20 @@ export default function BrokerPanel() {
 
     try {
       addRaw("[IG] Starting OAuth login...");
-      const isDemoEnv = selectedEnv === "demo";
-      const host = isDemoEnv ? "demo-api.ig.com" : "api.ig.com";
+      const ok = await igLogin();
+      if (!ok) throw new Error("IG login failed");
 
-      // Step 1: Create session
-      const sessionRes = await fetch(`https://${host}/gateway/deal/session`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-IG-API-KEY": igApiKey,
-          "Version": "2",
-        },
-        body: JSON.stringify({
-          identifier: igUsername,
-          password: igPassword,
-          encryptedPassword: false,
-        }),
-      });
-
-      const sessionText = await sessionRes.text();
-      addRaw(`[IG LOGIN] HTTP ${sessionRes.status}`);
-
-      if (!sessionRes.ok) {
-        throw new Error(`Login failed (${sessionRes.status}): ${sessionText.slice(0, 300)}`);
-      }
-
-      // IG returns auth tokens in HEADERS, not body
-      const cst = sessionRes.headers.get("CST") || sessionRes.headers.get("cst") || "";
-      const xst = sessionRes.headers.get("X-SECURITY-TOKEN") || sessionRes.headers.get("x-security-token") || "";
-
-      if (!cst || !xst) {
-        addRaw(`[IG WARN] Missing CST/XST headers. Body: ${sessionText.slice(0, 200)}`);
-        // Fallback to OAuth from body
-      }
-
-      const sessionData = JSON.parse(sessionText);
-      const oauth = sessionData.oauthToken || {};
-
-      // Store both header tokens and OAuth
-      igSessionRef.current = {
-        cst: cst || "fallback",
-        xSecurityToken: xst || "fallback",
-        access_token: oauth.access_token,
-        refresh_token: oauth.refresh_token,
-        accountId: sessionData.accountId || igAccountId || "",
-        clientId: String(sessionData.clientId || ""),
-      };
-
-      addRaw(`[IG] Session OK. CST=${cst ? "yes" : "no"}, XST=${xst ? "yes" : "no"}, Client: ${sessionData.clientId}`);
-      addLog("AUTORIZADO", `IG ${sessionData.accountId || igAccountId} | Client: ${sessionData.clientId}`);
+      const session = igSessionRef.current;
+      addRaw(`[IG] Session OK. CST=${session?.cst ? "yes" : "no"}, XST=${session?.xSecurityToken ? "yes" : "no"}`);
+      addLog("AUTORIZADO", `IG ${session?.accountId || igAccountId} | Client: ${session?.clientId || ""}`);
 
       // Step 2: Fetch initial data
       setIsConnected(true);
       setConnecting(false);
 
       // Use account from response if user didn't specify
-      if (!igAccountId && sessionData.accountId) {
-        setIgAccountId(sessionData.accountId);
+      if (!igAccountId && session?.accountId) {
+        setIgAccountId(session.accountId);
       }
 
       await igFetchData();
@@ -583,12 +611,20 @@ export default function BrokerPanel() {
   }, [isConnected, positions]);
 
   const executeCloseAll = useCallback(async (trigger: string) => {
+    // Force reset isClosing if stuck for more than 30 seconds
+    const elapsed = Date.now() - closeStartTimeRef.current;
+    if (isClosing && elapsed > 30000) {
+      addRaw(`[CLOSE FORCE RESET] isClosing stuck for ${elapsed}ms, forcing reset`);
+      setIsClosing(false);
+    }
+
     if (!isConnected || positions.length === 0 || isClosing) {
       addRaw(`[CLOSE SKIP] isConnected=${isConnected}, positions=${positions.length}, isClosing=${isClosing}`);
       return;
     }
     setIsClosing(true);
-    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}`);
+    closeStartTimeRef.current = Date.now();
+    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, isClosing=true`);
 
     try {
       if (isDemo) {
@@ -618,28 +654,30 @@ export default function BrokerPanel() {
             attempt++;
             try {
               const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
-              // IG requires a body in DELETE with specific fields
+              // IG close format: use dealId if available, otherwise epic+expiry
+              const hasDealId = pos.dealId && pos.dealId.length > 0;
               const closeBody: any = {
-                dealId: pos.id,
                 direction: closeDirection,
-                epic: pos.symbol.includes(".") ? pos.symbol : undefined,
-                expiry: "-",
                 size: pos.size,
                 orderType: "MARKET",
                 timeInForce: "EXECUTE_AND_ELIMINATE",
               };
-              // Remove undefined fields
-              Object.keys(closeBody).forEach(key => closeBody[key] === undefined && delete closeBody[key]);
+              if (hasDealId) {
+                closeBody.dealId = pos.dealId;
+              } else {
+                closeBody.epic = pos.epic || pos.symbol;
+                closeBody.expiry = pos.expiry || "-";
+              }
 
-              addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | dealId: ${pos.id}`);
+              addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | dealId: ${pos.dealId || "N/A"} | epic: ${pos.epic || "N/A"}`);
               const result = await igRequest("/positions/otc", "DELETE", closeBody);
-              addRaw(`[IG CLOSE OK v${attempt}] ${pos.id} | result: ${JSON.stringify(result).slice(0, 100)}`);
+              addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 100)}`);
               closed++;
               success = true;
             } catch (e: any) {
-              addRaw(`[IG CLOSE FAIL v${attempt}] ${pos.id}: ${e.message}`);
+              addRaw(`[IG CLOSE FAIL v${attempt}] ${pos.symbol}: ${e.message}`);
               if (attempt < 3) {
-                addRaw(`[IG CLOSE RETRY] ${pos.id} en 1s...`);
+                addRaw(`[IG CLOSE RETRY] ${pos.symbol} en 1s...`);
                 await new Promise(r => setTimeout(r, 1000));
               } else {
                 failed++;
@@ -652,7 +690,8 @@ export default function BrokerPanel() {
       }
     } finally {
       // Always reset isClosing after 5 seconds to prevent deadlock
-      setTimeout(() => {
+      if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
+      closingTimeoutRef.current = setTimeout(() => {
         setIsClosing(false);
         addRaw("[CLOSE] isClosing reseteado");
       }, 5000);
@@ -671,6 +710,18 @@ export default function BrokerPanel() {
       setPeakPnL(totalPnL);
     }
   }, [totalPnL, peakPnL]);
+
+  // Update initialBalance when positions are closed (number of positions decreases)
+  useEffect(() => {
+    const prevCount = prevPositionsCountRef.current;
+    const currentCount = positions.length;
+    if (prevCount > 0 && currentCount < prevCount && balance !== null) {
+      // Positions were closed — update initialBalance to new balance
+      setInitialBalance(balance);
+      addLog("SYSTEM", `Balance inicial actualizado tras cierre: ${balance.toFixed(2)} ${currency} (nuevo límite: ${(balance * protection.dailyLimitPct / 100).toFixed(2)})`);
+    }
+    prevPositionsCountRef.current = currentCount;
+  }, [positions.length, balance, currency, protection.dailyLimitPct, addLog]);
 
   // ═══════════════════════════════════════════════════════════════
   //  AUTOMATED PROTECTION — Trailing Stop & Drawdown Limits

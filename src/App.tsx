@@ -17,7 +17,6 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/payment/success" element={<PaymentSuccess />} />
       <Route path="/payment/cancel" element={<PaymentCancel />} />
-      <Route path="/deriv" element={<BrokerPanel />} />
       <Route path="/panel" element={<BrokerPanel />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/privacy" element={<PrivacyPage />} />
