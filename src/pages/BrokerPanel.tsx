@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Link } from "react-router";
 import {
   Shield, Activity, Wallet, TrendingDown, TrendingUp,
@@ -72,6 +72,13 @@ interface ProtectionLog {
   balance: number;
 }
 
+// Ledger entry for idempotent closed-trade tracking
+interface ClosedTrade {
+  dealId: string;
+  closedAt: number; // timestamp ms
+  pnl: number; // negative = loss, positive = profit
+}
+
 interface IGSession {
   cst: string;
   xSecurityToken: string;
@@ -120,7 +127,8 @@ export default function BrokerPanel() {
   const [totalPnL, setTotalPnL] = useState<number>(0);
   const [peakPnL, setPeakPnL] = useState<number>(0);
   const [initialBalance, setInitialBalance] = useState<number | null>(null);
-  const [realizedDailyLoss, setRealizedDailyLoss] = useState<number>(0);
+  // Ledger: idempotent record of closed trades by dealId (survives reconnects)
+  const [ledger, setLedger] = useState<Record<string, ClosedTrade>>({});
   const [trailingFired, setTrailingFired] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
 
@@ -148,7 +156,7 @@ export default function BrokerPanel() {
   const igSessionRef = useRef<IGSession | null>(null);
   const igRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const igPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const prevPositionsCountRef = useRef<number>(0);
+  const prevPositionsRef = useRef<Position[]>([]);
   const balanceBeforeCloseRef = useRef<number | null>(null);
   const totalPnLBeforeCloseRef = useRef<number>(0);
   const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -170,6 +178,27 @@ export default function BrokerPanel() {
     console.log("[BrokerPanel]", msg);
   }, []);
 
+  // ─── Trading Day Helper ─────────────────────────────────────
+  // Forex trading day ends at 17:00 NY (22:00 UTC), not local midnight
+  const getTradingDayKey = useCallback(() => {
+    const now = new Date();
+    // Convert to UTC, subtract 22 hours → find the "trading day" boundary
+    const d = new Date(now.getTime() - 22 * 60 * 60 * 1000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  }, []);
+
+  // Derived: realized daily loss from ledger (only losses, idempotent)
+  const realizedDailyLoss = useMemo(() => {
+    const todayKey = getTradingDayKey();
+    return Object.values(ledger)
+      .filter(entry => {
+        const entryDay = new Date(entry.closedAt - 22 * 60 * 60 * 1000);
+        const entryKey = `${entryDay.getUTCFullYear()}-${String(entryDay.getUTCMonth() + 1).padStart(2, "0")}-${String(entryDay.getUTCDate()).padStart(2, "0")}`;
+        return entryKey === todayKey;
+      })
+      .reduce((sum, entry) => sum + Math.max(0, -entry.pnl), 0);
+  }, [ledger, getTradingDayKey, tradingDayTick]);
+
   const clearConnection = useCallback(() => {
     connGenRef.current++; // invalidate all in-flight async ops
     wsRef.current?.close();
@@ -184,10 +213,10 @@ export default function BrokerPanel() {
     setTotalPnL(0);
     setPeakPnL(0);
     setInitialBalance(null);
-    setRealizedDailyLoss(0);
+    // NOTE: ledger is intentionally NOT reset here — survives reconnects
     balanceBeforeCloseRef.current = null;
     totalPnLBeforeCloseRef.current = 0;
-    prevPositionsCountRef.current = 0;
+    prevPositionsRef.current = [];
     setTrailingFired(false);
     setIsClosing(false);
     isClosingRef.current = false;
@@ -224,18 +253,12 @@ export default function BrokerPanel() {
     addRaw("[DEMO] Modo demostración desactivado");
   }, [addRaw]);
 
-  // ─── Midnight reset for realizedDailyLoss ────────────────────
+  // ─── Trading day tick: force recalc of realizedDailyLoss at day boundary ───
+  const [tradingDayTick, setTradingDayTick] = useState(Date.now());
   useEffect(() => {
-    const checkMidnight = () => {
-      const now = new Date();
-      if (now.getHours() === 0 && now.getMinutes() === 0) {
-        setRealizedDailyLoss(0);
-        addLog("SYSTEM", "Nuevo día: contador de pérdida diaria reiniciado a 0");
-      }
-    };
-    const interval = setInterval(checkMidnight, 60000); // check every minute
+    const interval = setInterval(() => setTradingDayTick(Date.now()), 60000); // every minute
     return () => clearInterval(interval);
-  }, [addLog]);
+  }, []);
 
   // ═══════════════════════════════════════════════════════════════
   //  DERIV CONNECTION
@@ -804,31 +827,39 @@ export default function BrokerPanel() {
     }
   }, [totalPnL, peakPnL]);
 
-  // Track realized daily loss: ONLY updates when positions decrease (trades close)
-  // Uses totalPnLBeforeCloseRef to compute exact P&L realized from closed trades
+  // Track realized daily loss: idempotent ledger of closed trades by dealId
+  // Survives reconnects — prevPositionsRef detects which trades disappeared
   useEffect(() => {
-    const prevCount = prevPositionsCountRef.current;
-    const currentCount = positions.length;
+    const prevPositions = prevPositionsRef.current;
+    const currentPositions = positions;
 
-    if (prevCount > 0 && currentCount < prevCount) {
-      // Positions were closed — compute realized P&L from totalPnL change
-      const pnlBefore = totalPnLBeforeCloseRef.current ?? 0;
-      const pnlAfter = totalPnL;
-      const pnlRealized = pnlBefore - pnlAfter; // positive = profit realized, negative = loss realized
-      const lossFromClose = Math.max(0, -pnlRealized); // only count losses
+    if (prevPositions.length > 0 && currentPositions.length < prevPositions.length) {
+      const currentIds = new Set(currentPositions.map(p => p.dealId || p.id));
+      const closedPositions = prevPositions.filter(p => !currentIds.has(p.dealId || p.id));
 
-      if (lossFromClose > 0.01) {
-        setRealizedDailyLoss(prev => {
-          const newVal = prev + lossFromClose;
-          addLog("SYSTEM", `Pérdida realizada: +${lossFromClose.toFixed(2)} ${currency} | Acumulado: ${newVal.toFixed(2)} ${currency}`);
-          return newVal;
+      for (const closed of closedPositions) {
+        const dealId = closed.dealId || closed.id;
+        if (!dealId) continue;
+
+        setLedger(prev => {
+          if (dealId in prev) return prev; // idempotent — already recorded
+          const entry: ClosedTrade = {
+            dealId,
+            closedAt: Date.now(),
+            pnl: closed.profit, // profit positive = win, negative = loss
+          };
+          const loss = Math.max(0, -closed.profit);
+          if (loss > 0.01) {
+            addLog("SYSTEM", `Trade cerrado: ${closed.symbol} | Pérdida: ${loss.toFixed(2)} ${currency} | dealId: ${dealId.slice(0, 12)}...`);
+          }
+          return { ...prev, [dealId]: entry };
         });
       }
     }
 
-    prevPositionsCountRef.current = currentCount;
+    prevPositionsRef.current = currentPositions;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [positions.length, totalPnL, currency, addLog]);
+  }, [positions, currency, addLog]);
 
   // ═══════════════════════════════════════════════════════════════
   //  AUTOMATED PROTECTION — Trailing Stop & Drawdown Limits
