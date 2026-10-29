@@ -187,17 +187,12 @@ export default function BrokerPanel() {
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
   }, []);
 
-  // Derived: realized daily loss from ledger (only losses, idempotent)
+  // Derived: realized daily loss from SESSION ledger (only losses, idempotent)
+  // Ledger is cleared on disconnect — each session starts fresh
   const realizedDailyLoss = useMemo(() => {
-    const todayKey = getTradingDayKey();
     return Object.values(ledger)
-      .filter(entry => {
-        const entryDay = new Date(entry.closedAt - 22 * 60 * 60 * 1000);
-        const entryKey = `${entryDay.getUTCFullYear()}-${String(entryDay.getUTCMonth() + 1).padStart(2, "0")}-${String(entryDay.getUTCDate()).padStart(2, "0")}`;
-        return entryKey === todayKey;
-      })
       .reduce((sum, entry) => sum + Math.max(0, -entry.pnl), 0);
-  }, [ledger, getTradingDayKey, tradingDayTick]);
+  }, [ledger]);
 
   const clearConnection = useCallback(() => {
     connGenRef.current++; // invalidate all in-flight async ops
@@ -213,7 +208,7 @@ export default function BrokerPanel() {
     setTotalPnL(0);
     setPeakPnL(0);
     setInitialBalance(null);
-    // NOTE: ledger is intentionally NOT reset here — survives reconnects
+    setLedger({}); // SESSION ledger: cleared on disconnect
     balanceBeforeCloseRef.current = null;
     totalPnLBeforeCloseRef.current = 0;
     prevPositionsRef.current = [];
