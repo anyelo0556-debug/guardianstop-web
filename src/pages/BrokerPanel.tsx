@@ -120,6 +120,7 @@ export default function BrokerPanel() {
   const [totalPnL, setTotalPnL] = useState<number>(0);
   const [peakPnL, setPeakPnL] = useState<number>(0);
   const [initialBalance, setInitialBalance] = useState<number | null>(null);
+  const [realizedDailyLoss, setRealizedDailyLoss] = useState<number>(0);
   const [trailingFired, setTrailingFired] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
 
@@ -148,6 +149,7 @@ export default function BrokerPanel() {
   const igRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const igPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPositionsCountRef = useRef<number>(0);
+  const balanceBeforeCloseRef = useRef<number | null>(null);
   const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeStartTimeRef = useRef<number>(0);
 
@@ -177,6 +179,8 @@ export default function BrokerPanel() {
     setTotalPnL(0);
     setPeakPnL(0);
     setInitialBalance(null);
+    setRealizedDailyLoss(0);
+    balanceBeforeCloseRef.current = null;
     setTrailingFired(false);
     setIsClosing(false);
   }, []);
@@ -193,6 +197,7 @@ export default function BrokerPanel() {
     setBalance(DEMO_BALANCE);
     setCurrency(DEMO_CURRENCY);
     setInitialBalance(DEMO_BALANCE);
+    balanceBeforeCloseRef.current = DEMO_BALANCE;
     const demoPnL = DEMO_POSITIONS.reduce((sum, p) => sum + p.profit, 0);
     setPositions(DEMO_POSITIONS);
     setTotalPnL(demoPnL);
@@ -483,6 +488,7 @@ export default function BrokerPanel() {
         setInitialBalance((prev) => {
           if (prev === null) {
             addRaw(`[IG] initialBalance SET to ${bal} ${activeAccount.currency || "USD"} (session start)`);
+            balanceBeforeCloseRef.current = bal;
             return bal;
           }
           return prev;
@@ -650,32 +656,43 @@ export default function BrokerPanel() {
         for (const pos of positions) {
           let attempt = 0;
           let success = false;
+          const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
+          let closeBody: any = {
+            direction: closeDirection,
+            size: pos.size,
+            orderType: "MARKET",
+            timeInForce: "EXECUTE_AND_ELIMINATE",
+          };
+          if (pos.dealId && pos.dealId.length > 0) {
+            closeBody.dealId = pos.dealId;
+          } else {
+            closeBody.epic = pos.epic || pos.symbol;
+            closeBody.expiry = pos.expiry || "-";
+          }
+
           while (attempt < 3 && !success) {
             attempt++;
             try {
-              const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
-              // IG close format: use dealId if available, otherwise epic+expiry
-              const hasDealId = pos.dealId && pos.dealId.length > 0;
-              const closeBody: any = {
-                direction: closeDirection,
-                size: pos.size,
-                orderType: "MARKET",
-                timeInForce: "EXECUTE_AND_ELIMINATE",
-              };
-              if (hasDealId) {
-                closeBody.dealId = pos.dealId;
-              } else {
-                closeBody.epic = pos.epic || pos.symbol;
-                closeBody.expiry = pos.expiry || "-";
-              }
-
-              addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | dealId: ${pos.dealId || "N/A"} | epic: ${pos.epic || "N/A"}`);
+              addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | body=${JSON.stringify(closeBody)}`);
               const result = await igRequest("/positions/otc", "DELETE", closeBody);
-              addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 100)}`);
+              addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 200)}`);
               closed++;
               success = true;
             } catch (e: any) {
               addRaw(`[IG CLOSE FAIL v${attempt}] ${pos.symbol}: ${e.message}`);
+              // If dealId failed, try with epic+expiry on next attempt
+              if (attempt === 1 && pos.dealId) {
+                addRaw(`[IG CLOSE FALLBACK] Intentando con epic+expiry en vez de dealId...`);
+                const fallbackBody: any = {
+                  direction: closeDirection,
+                  size: pos.size,
+                  orderType: "MARKET",
+                  timeInForce: "EXECUTE_AND_ELIMINATE",
+                  epic: pos.epic || pos.symbol,
+                  expiry: pos.expiry || "-",
+                };
+                closeBody = fallbackBody;
+              }
               if (attempt < 3) {
                 addRaw(`[IG CLOSE RETRY] ${pos.symbol} en 1s...`);
                 await new Promise(r => setTimeout(r, 1000));
@@ -711,17 +728,28 @@ export default function BrokerPanel() {
     }
   }, [totalPnL, peakPnL]);
 
-  // Update initialBalance when positions are closed (number of positions decreases)
+  // Track realized daily loss: ONLY updates when positions decrease (trades close)
   useEffect(() => {
     const prevCount = prevPositionsCountRef.current;
     const currentCount = positions.length;
+
     if (prevCount > 0 && currentCount < prevCount && balance !== null) {
-      // Positions were closed — update initialBalance to new balance
+      // Positions were closed — estimate realized P&L from balance change
+      const balBefore = balanceBeforeCloseRef.current ?? initialBalance ?? balance;
+      const closedPnL = balance - balBefore; // negative = loss, positive = win
+      const lossFromClose = Math.max(0, -closedPnL); // only count losses
+
+      setRealizedDailyLoss(prev => prev + lossFromClose);
       setInitialBalance(balance);
-      addLog("SYSTEM", `Balance inicial actualizado tras cierre: ${balance.toFixed(2)} ${currency} (nuevo límite: ${(balance * protection.dailyLimitPct / 100).toFixed(2)})`);
+      balanceBeforeCloseRef.current = balance;
+      addLog("SYSTEM", `Cierre detectado: P&L realizado=${closedPnL.toFixed(2)}, pérdida acumulada=${(realizedDailyLoss + lossFromClose).toFixed(2)} ${currency}`);
+    } else if (prevCount === 0 && currentCount > 0 && balance !== null) {
+      // First positions opened — set baseline for future close calculations
+      balanceBeforeCloseRef.current = balance;
     }
+
     prevPositionsCountRef.current = currentCount;
-  }, [positions.length, balance, currency, protection.dailyLimitPct, addLog]);
+  }, [positions.length, balance, currency, initialBalance, realizedDailyLoss, addLog]);
 
   // ═══════════════════════════════════════════════════════════════
   //  AUTOMATED PROTECTION — Trailing Stop & Drawdown Limits
@@ -732,14 +760,12 @@ export default function BrokerPanel() {
       return false;
     }
 
-    // 1. DAILY DRAWDOWN LIMIT
+    // 1. DAILY DRAWDOWN LIMIT — uses ONLY realized losses from closed trades
     if (initialBalance && balance !== null) {
-      const effectiveBalance = balance + totalPnL;
-      const sessionLoss = initialBalance - effectiveBalance;
       const dailyLimit = initialBalance * (protection.dailyLimitPct / 100);
-      addRaw(`[PROTECTION CHECK] initialBalance=${initialBalance.toFixed(2)}, balance=${balance.toFixed(2)}, totalPnL=${totalPnL.toFixed(2)}, effectiveBalance=${effectiveBalance.toFixed(2)}, sessionLoss=${sessionLoss.toFixed(2)}, dailyLimit=${dailyLimit.toFixed(2)}, positions=${positions.length}`);
-      if (sessionLoss >= dailyLimit && positions.length > 0) {
-        addLog("PROTECCIÓN", `Límite diario alcanzado: -${sessionLoss.toFixed(2)} ${currency}. Cerrando todo.`);
+      addRaw(`[PROTECTION CHECK] Daily Limit: realizedDailyLoss=${realizedDailyLoss.toFixed(2)}, dailyLimit=${dailyLimit.toFixed(2)}, positions=${positions.length}`);
+      if (realizedDailyLoss >= dailyLimit && positions.length > 0) {
+        addLog("PROTECCIÓN", `Límite diario alcanzado: pérdida realizada ${realizedDailyLoss.toFixed(2)} >= ${dailyLimit.toFixed(2)} ${currency}. Cerrando todo.`);
         executeCloseAll("LÍMITE DIARIO");
         return true;
       }
@@ -765,7 +791,7 @@ export default function BrokerPanel() {
       }
     }
     return false;
-  }, [protection, isConnected, initialBalance, balance, totalPnL, positions.length, currency, trailingFired, peakPnL, addLog, addRaw, executeCloseAll]);
+  }, [protection, isConnected, initialBalance, balance, realizedDailyLoss, totalPnL, positions.length, currency, trailingFired, peakPnL, addLog, addRaw, executeCloseAll]);
 
   // Run protection check whenever data changes
   useEffect(() => {
@@ -1019,8 +1045,9 @@ export default function BrokerPanel() {
           const sessionDrawdown = initialBalance && effectiveBalance > 0 ? initialBalance - effectiveBalance : 0;
           const sessionDrawdownPct = initialBalance && initialBalance > 0 ? (sessionDrawdown / initialBalance) * 100 : 0;
           const dailyLimitAmount = initialBalance ? initialBalance * protection.dailyLimitPct / 100 : 0;
-          const remainingDaily = Math.max(0, dailyLimitAmount - sessionDrawdown);
-          const dailyPctUsed = dailyLimitAmount > 0 ? Math.min((sessionDrawdown / dailyLimitAmount) * 100, 100) : 0;
+          // Daily limit uses ONLY realized losses from closed trades (NOT floating P&L)
+          const remainingDaily = Math.max(0, dailyLimitAmount - realizedDailyLoss);
+          const dailyPctUsed = dailyLimitAmount > 0 ? Math.min((realizedDailyLoss / dailyLimitAmount) * 100, 100) : 0;
 
           return (
             <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -1119,9 +1146,9 @@ export default function BrokerPanel() {
                       }`} style={{ width: `${Math.min(dailyPctUsed, 100)}%` }} />
                     </div>
                     <p className="mt-1 text-sm text-gs-muted">
-                      {dailyPctUsed >= 100
-                        ? "¡LÍMITE DIARIO ALCANZADO! Cerrando..."
-                        : `Faltan ${remainingDaily.toFixed(2)} ${currency} para cierre (${(100 - dailyPctUsed).toFixed(0)}% libre)`}
+                      {sessionDrawdownPct >= protection.dailyLimitPct
+                        ? "¡DRAWDOWN ALTO! Monitoreando..."
+                        : `Faltan ${Math.max(0, (protection.dailyLimitPct - sessionDrawdownPct) / 100 * initialBalance).toFixed(2)} ${currency} para alerta (${Math.max(0, protection.dailyLimitPct - sessionDrawdownPct).toFixed(0)}% libre)`}
                     </p>
                   </>
                 )}
