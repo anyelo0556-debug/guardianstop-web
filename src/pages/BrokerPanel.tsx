@@ -150,8 +150,10 @@ export default function BrokerPanel() {
   const igPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPositionsCountRef = useRef<number>(0);
   const balanceBeforeCloseRef = useRef<number | null>(null);
+  const totalPnLBeforeCloseRef = useRef<number>(0);
   const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeStartTimeRef = useRef<number>(0);
+  const isClosingRef = useRef(false);
 
   // ─── Helpers ────────────────────────────────────────────────
   const addLog = useCallback((action: string, message: string) => {
@@ -183,6 +185,7 @@ export default function BrokerPanel() {
     balanceBeforeCloseRef.current = null;
     setTrailingFired(false);
     setIsClosing(false);
+    isClosingRef.current = false;
   }, []);
 
   // ═══════════════════════════════════════════════════════════════
@@ -387,11 +390,26 @@ export default function BrokerPanel() {
 
     addRaw(`[IG REQ] ${method} ${path} (attempt ${attempt})`);
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    // Timeout after 10 seconds to prevent infinite hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (fetchErr: any) {
+      clearTimeout(timeoutId);
+      if (fetchErr.name === "AbortError") {
+        throw new Error(`IG TIMEOUT: ${method} ${path} — no response after 10s`);
+      }
+      throw new Error(`IG FETCH ERROR: ${fetchErr.message}`);
+    }
+    clearTimeout(timeoutId);
 
     const text = await res.text();
 
@@ -617,20 +635,35 @@ export default function BrokerPanel() {
   }, [isConnected, positions]);
 
   const executeCloseAll = useCallback(async (trigger: string) => {
-    // Force reset isClosing if stuck for more than 30 seconds
+    // Force reset if stuck for more than 15 seconds
     const elapsed = Date.now() - closeStartTimeRef.current;
-    if (isClosing && elapsed > 30000) {
+    if (isClosingRef.current && elapsed > 15000) {
       addRaw(`[CLOSE FORCE RESET] isClosing stuck for ${elapsed}ms, forcing reset`);
       setIsClosing(false);
+      isClosingRef.current = false;
     }
 
-    if (!isConnected || positions.length === 0 || isClosing) {
-      addRaw(`[CLOSE SKIP] isConnected=${isConnected}, positions=${positions.length}, isClosing=${isClosing}`);
+    if (!isConnected || positions.length === 0 || isClosingRef.current) {
+      addRaw(`[CLOSE SKIP] isConnected=${isConnected}, positions=${positions.length}, isClosing=${isClosingRef.current}`);
       return;
     }
+
+    // Save total P&L BEFORE closing so we can compute realized loss later
+    totalPnLBeforeCloseRef.current = totalPnL;
+
     setIsClosing(true);
+    isClosingRef.current = true;
     closeStartTimeRef.current = Date.now();
-    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, isClosing=true`);
+    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, totalPnL=${totalPnL.toFixed(2)}, isClosing=true`);
+
+    // Hard safety: force reset isClosing after 15 seconds no matter what
+    const hardResetTimeout = setTimeout(() => {
+      if (isClosingRef.current) {
+        addRaw("[CLOSE HARD RESET] 15s timeout reached, forcing isClosing=false");
+        setIsClosing(false);
+        isClosingRef.current = false;
+      }
+    }, 15000);
 
     try {
       if (isDemo) {
@@ -706,14 +739,16 @@ export default function BrokerPanel() {
         setTimeout(refreshData, 3000);
       }
     } finally {
-      // Always reset isClosing after 5 seconds to prevent deadlock
+      clearTimeout(hardResetTimeout);
+      // Reset isClosing immediately (or after short delay for UI feedback)
       if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
       closingTimeoutRef.current = setTimeout(() => {
         setIsClosing(false);
+        isClosingRef.current = false;
         addRaw("[CLOSE] isClosing reseteado");
-      }, 5000);
+      }, 2000);
     }
-  }, [isConnected, positions, isDemo, selectedBroker, isClosing, addLog, addRaw, refreshData, igRequest]);
+  }, [isConnected, positions, isDemo, selectedBroker, totalPnL, addLog, addRaw, refreshData, igRequest]);
 
   // Auto-connect on mount for Deriv (legacy behavior)
   useEffect(() => {
@@ -729,27 +764,27 @@ export default function BrokerPanel() {
   }, [totalPnL, peakPnL]);
 
   // Track realized daily loss: ONLY updates when positions decrease (trades close)
+  // Uses totalPnLBeforeCloseRef to compute exact P&L realized from closed trades
   useEffect(() => {
     const prevCount = prevPositionsCountRef.current;
     const currentCount = positions.length;
 
-    if (prevCount > 0 && currentCount < prevCount && balance !== null) {
-      // Positions were closed — estimate realized P&L from balance change
-      const balBefore = balanceBeforeCloseRef.current ?? initialBalance ?? balance;
-      const closedPnL = balance - balBefore; // negative = loss, positive = win
-      const lossFromClose = Math.max(0, -closedPnL); // only count losses
+    if (prevCount > 0 && currentCount < prevCount) {
+      // Positions were closed — compute realized P&L from totalPnL change
+      const pnlBefore = totalPnLBeforeCloseRef.current ?? 0;
+      const pnlAfter = totalPnL;
+      const pnlRealized = pnlBefore - pnlAfter; // positive = profit realized, negative = loss realized
+      const lossFromClose = Math.max(0, -pnlRealized); // only count losses
 
-      setRealizedDailyLoss(prev => prev + lossFromClose);
-      setInitialBalance(balance);
-      balanceBeforeCloseRef.current = balance;
-      addLog("SYSTEM", `Cierre detectado: P&L realizado=${closedPnL.toFixed(2)}, pérdida acumulada=${(realizedDailyLoss + lossFromClose).toFixed(2)} ${currency}`);
-    } else if (prevCount === 0 && currentCount > 0 && balance !== null) {
-      // First positions opened — set baseline for future close calculations
-      balanceBeforeCloseRef.current = balance;
+      if (lossFromClose > 0) {
+        setRealizedDailyLoss(prev => prev + lossFromClose);
+        addLog("SYSTEM", `Pérdida realizada: +${lossFromClose.toFixed(2)} ${currency} | Acumulado: ${(realizedDailyLoss + lossFromClose).toFixed(2)} ${currency}`);
+      }
     }
 
     prevPositionsCountRef.current = currentCount;
-  }, [positions.length, balance, currency, initialBalance, realizedDailyLoss, addLog]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positions.length, totalPnL, currency, addLog]);
 
   // ═══════════════════════════════════════════════════════════════
   //  AUTOMATED PROTECTION — Trailing Stop & Drawdown Limits
