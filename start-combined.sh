@@ -4,18 +4,30 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Detect Python
+PYTHON_CMD=""
+if command -v python3 &> /dev/null; then
+    PYTHON_CMD="python3"
+elif command -v python &> /dev/null; then
+    PYTHON_CMD="python"
+else
+    echo "[STARTUP] WARNING: Python not found. Risk Engine will not start."
+fi
+
 # Install Python deps if needed
-if [ ! -f ".engine-deps-installed" ]; then
+if [ -n "$PYTHON_CMD" ] && [ ! -f ".engine-deps-installed" ]; then
     echo "[STARTUP] Installing Python dependencies..."
-    pip install -q -r requirements-engine.txt
+    $PYTHON_CMD -m pip install -q -r requirements-engine.txt 2>/dev/null || pip3 install -q -r requirements-engine.txt 2>/dev/null || pip install -q -r requirements-engine.txt 2>/dev/null || true
     touch .engine-deps-installed
 fi
 
 # Start Risk Engine in background
-echo "[STARTUP] Starting Risk Engine..."
-python engine/main.py &
-ENGINE_PID=$!
-echo "[STARTUP] Engine PID: $ENGINE_PID"
+if [ -n "$PYTHON_CMD" ]; then
+    echo "[STARTUP] Starting Risk Engine..."
+    $PYTHON_CMD engine/main.py &
+    ENGINE_PID=$!
+    echo "[STARTUP] Engine PID: $ENGINE_PID"
+fi
 
 # Start Web server
 echo "[STARTUP] Starting Web server..."
