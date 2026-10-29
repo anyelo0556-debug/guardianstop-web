@@ -183,6 +183,8 @@ export default function BrokerPanel() {
     setInitialBalance(null);
     setRealizedDailyLoss(0);
     balanceBeforeCloseRef.current = null;
+    totalPnLBeforeCloseRef.current = 0;
+    prevPositionsCountRef.current = 0;
     setTrailingFired(false);
     setIsClosing(false);
     isClosingRef.current = false;
@@ -218,6 +220,19 @@ export default function BrokerPanel() {
     setLogs([]);
     addRaw("[DEMO] Modo demostración desactivado");
   }, [addRaw]);
+
+  // ─── Midnight reset for realizedDailyLoss ────────────────────
+  useEffect(() => {
+    const checkMidnight = () => {
+      const now = new Date();
+      if (now.getHours() === 0 && now.getMinutes() === 0) {
+        setRealizedDailyLoss(0);
+        addLog("SYSTEM", "Nuevo día: contador de pérdida diaria reiniciado a 0");
+      }
+    };
+    const interval = setInterval(checkMidnight, 60000); // check every minute
+    return () => clearInterval(interval);
+  }, [addLog]);
 
   // ═══════════════════════════════════════════════════════════════
   //  DERIV CONNECTION
@@ -629,10 +644,17 @@ export default function BrokerPanel() {
   }, [isConnected, isDemo, selectedBroker, addRaw, igFetchData]);
 
   const closeAllPositions = useCallback(async () => {
-    if (!isConnected || positions.length === 0) return;
+    if (!isConnected) {
+      addLog("ERROR", "No conectado. Conecta IG primero.");
+      return;
+    }
+    if (positions.length === 0) {
+      addLog("INFO", "No hay posiciones abiertas para cerrar.");
+      return;
+    }
     if (!confirm(`¿Cerrar ${positions.length} posiciones abiertas?`)) return;
     await executeCloseAll("MANUAL");
-  }, [isConnected, positions]);
+  }, [isConnected, positions, addLog]);
 
   const executeCloseAll = useCallback(async (trigger: string) => {
     // Force reset if stuck for more than 15 seconds
@@ -776,9 +798,12 @@ export default function BrokerPanel() {
       const pnlRealized = pnlBefore - pnlAfter; // positive = profit realized, negative = loss realized
       const lossFromClose = Math.max(0, -pnlRealized); // only count losses
 
-      if (lossFromClose > 0) {
-        setRealizedDailyLoss(prev => prev + lossFromClose);
-        addLog("SYSTEM", `Pérdida realizada: +${lossFromClose.toFixed(2)} ${currency} | Acumulado: ${(realizedDailyLoss + lossFromClose).toFixed(2)} ${currency}`);
+      if (lossFromClose > 0.01) {
+        setRealizedDailyLoss(prev => {
+          const newVal = prev + lossFromClose;
+          addLog("SYSTEM", `Pérdida realizada: +${lossFromClose.toFixed(2)} ${currency} | Acumulado: ${newVal.toFixed(2)} ${currency}`);
+          return newVal;
+        });
       }
     }
 
@@ -1077,7 +1102,8 @@ export default function BrokerPanel() {
         {/* Account Info Cards */}
         {(() => {
           const effectiveBalance = initialBalance && balance !== null ? balance + totalPnL : 0;
-          const sessionDrawdown = initialBalance && effectiveBalance > 0 ? initialBalance - effectiveBalance : 0;
+          // Drawdown = how much we lost from initial balance (never negative = never show gains as drawdown)
+          const sessionDrawdown = initialBalance && effectiveBalance > 0 ? Math.max(0, initialBalance - effectiveBalance) : 0;
           const sessionDrawdownPct = initialBalance && initialBalance > 0 ? (sessionDrawdown / initialBalance) * 100 : 0;
           const dailyLimitAmount = initialBalance ? initialBalance * protection.dailyLimitPct / 100 : 0;
           // Daily limit uses ONLY realized losses from closed trades (NOT floating P&L)
@@ -1106,8 +1132,8 @@ export default function BrokerPanel() {
                   {balance !== null ? `${balance.toFixed(2)} ${currency}` : "--.--"}
                 </div>
                 {initialBalance && balance !== null && (
-                  <p className={`mt-1 text-sm font-medium ${sessionDrawdown > 0 ? "text-red-400" : "text-green-400"}`}>
-                    {sessionDrawdown > 0 ? "-" : "+"}{Math.abs(sessionDrawdown).toFixed(2)} {currency} desde inicio
+                  <p className={`mt-1 text-sm font-medium ${balance > initialBalance ? "text-green-400" : balance < initialBalance ? "text-red-400" : "text-gs-muted"}`}>
+                    {balance > initialBalance ? "+" : balance < initialBalance ? "-" : ""}{Math.abs(balance - initialBalance).toFixed(2)} {currency} desde conexión
                   </p>
                 )}
               </div>
@@ -1160,29 +1186,31 @@ export default function BrokerPanel() {
                 ) : (
                   <>
                     <div className="flex items-baseline gap-2">
-                      <span className={`text-2xl font-bold font-mono ${
-                        sessionDrawdown > 0 ? "text-red-400" : "text-green-400"
-                      }`}>
-                        {sessionDrawdown > 0 ? "-" : ""}{Math.abs(sessionDrawdown).toFixed(2)} {currency}
+                      <span className="text-2xl font-bold font-mono text-red-400">
+                        {sessionDrawdown.toFixed(2)} {currency}
                       </span>
                       <span className={`text-lg font-bold ${
                         sessionDrawdownPct >= protection.dailyLimitPct ? "text-red-400"
                         : sessionDrawdownPct >= protection.dailyLimitPct * 0.7 ? "text-orange-400"
-                        : "text-yellow-400"
+                        : sessionDrawdownPct > 0 ? "text-yellow-400"
+                        : "text-green-400"
                       }`}>
                         ({sessionDrawdownPct.toFixed(2)}%)
                       </span>
                     </div>
                     <div className="mt-2 h-2 w-full rounded-full bg-gs-bg overflow-hidden">
                       <div className={`h-full rounded-full transition-all duration-500 ${
-                        dailyPctUsed >= 100 ? "bg-red-500"
-                        : dailyPctUsed >= 70 ? "bg-orange-500"
-                        : "bg-yellow-500"
-                      }`} style={{ width: `${Math.min(dailyPctUsed, 100)}%` }} />
+                        sessionDrawdownPct >= 100 ? "bg-red-500"
+                        : sessionDrawdownPct >= 70 ? "bg-orange-500"
+                        : sessionDrawdownPct > 0 ? "bg-yellow-500"
+                        : "bg-green-500"
+                      }`} style={{ width: `${Math.min(sessionDrawdownPct, 100)}%` }} />
                     </div>
                     <p className="mt-1 text-sm text-gs-muted">
                       {sessionDrawdownPct >= protection.dailyLimitPct
                         ? "¡DRAWDOWN ALTO! Monitoreando..."
+                        : sessionDrawdown === 0
+                        ? "Sin pérdidas en esta sesión"
                         : `Faltan ${Math.max(0, (protection.dailyLimitPct - sessionDrawdownPct) / 100 * initialBalance).toFixed(2)} ${currency} para alerta (${Math.max(0, protection.dailyLimitPct - sessionDrawdownPct).toFixed(0)}% libre)`}
                     </p>
                   </>
