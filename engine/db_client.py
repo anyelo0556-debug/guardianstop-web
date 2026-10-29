@@ -34,6 +34,8 @@ _pool_kwargs = _parse_db_url()
 
 @contextmanager
 def _conn():
+    # PlanetScale/TiDB requires SSL
+    ssl_config = {"ca": "/etc/ssl/certs/ca-certificates.crt"} if os.path.exists("/etc/ssl/certs/ca-certificates.crt") else {"ca": "/etc/ssl/cert.pem"} if os.path.exists("/etc/ssl/cert.pem") else None
     conn = pymysql.connect(
         host=_pool_kwargs["host"],
         port=_pool_kwargs["port"],
@@ -43,6 +45,10 @@ def _conn():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
+        ssl=ssl_config,
+        connect_timeout=10,
+        read_timeout=10,
+        write_timeout=10,
     )
     try:
         yield conn
