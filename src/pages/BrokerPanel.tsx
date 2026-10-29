@@ -131,7 +131,6 @@ export default function BrokerPanel() {
   // Ledger: idempotent record of closed trades by dealId (survives reconnects)
   const [ledger, setLedger] = useState<Record<string, ClosedTrade>>({});
   const [trailingFired, setTrailingFired] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
 
   const [protection, setProtection] = useState({
     dailyLimitPct: 1,
@@ -158,11 +157,6 @@ export default function BrokerPanel() {
   const igRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const igPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPositionsRef = useRef<Position[]>([]);
-  const balanceBeforeCloseRef = useRef<number | null>(null);
-  const totalPnLBeforeCloseRef = useRef<number>(0);
-  const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const closeStartTimeRef = useRef<number>(0);
-  const isClosingRef = useRef(false);
   // Connection generation: increments on every connect/disconnect to invalidate stale async ops
   const connGenRef = useRef(0);
 
@@ -210,12 +204,8 @@ export default function BrokerPanel() {
     setPeakPnL(0);
     setInitialBalance(null);
     setLedger({}); // SESSION ledger: cleared on disconnect
-    balanceBeforeCloseRef.current = null;
-    totalPnLBeforeCloseRef.current = 0;
     prevPositionsRef.current = [];
     setTrailingFired(false);
-    setIsClosing(false);
-    isClosingRef.current = false;
   }, []);
 
   // ═══════════════════════════════════════════════════════════════
@@ -230,7 +220,6 @@ export default function BrokerPanel() {
     setBalance(DEMO_BALANCE);
     setCurrency(DEMO_CURRENCY);
     setInitialBalance(DEMO_BALANCE);
-    balanceBeforeCloseRef.current = DEMO_BALANCE;
     const demoPnL = DEMO_POSITIONS.reduce((sum, p) => sum + p.profit, 0);
     setPositions(DEMO_POSITIONS);
     setTotalPnL(demoPnL);
@@ -552,7 +541,6 @@ export default function BrokerPanel() {
           if (isStale()) return prev; // don't update if stale
           if (prev === null) {
             addRaw(`[IG] initialBalance SET to ${bal} ${activeAccount.currency || "USD"} (session start)`);
-            balanceBeforeCloseRef.current = bal;
             return bal;
           }
           return prev;
@@ -687,129 +675,8 @@ export default function BrokerPanel() {
     }
   }, [isConnected, isDemo, selectedBroker, addRaw, igFetchData]);
 
-  const closeAllPositions = useCallback(async () => {
-    if (!isConnected) {
-      addLog("ERROR", "No conectado. Conecta IG primero.");
-      return;
-    }
-    if (positions.length === 0) {
-      addLog("INFO", "No hay posiciones abiertas para cerrar.");
-      return;
-    }
-    if (!confirm(`¿Cerrar ${positions.length} posiciones abiertas?`)) return;
-    await executeCloseAll("MANUAL");
-  }, [isConnected, positions, addLog]);
-
-  const executeCloseAll = useCallback(async (trigger: string) => {
-    const myGen = connGenRef.current;
-    const isStale = () => connGenRef.current !== myGen;
-
-    // ─── GUARD: prevent re-entry ──────────────────────────────
-    if (!isConnected || positions.length === 0 || isClosingRef.current) {
-      addRaw(`[CLOSE SKIP] isConnected=${isConnected}, positions=${positions.length}, isClosing=${isClosingRef.current}`);
-      return;
-    }
-
-    // Save total P&L BEFORE closing so we can compute realized loss later
-    totalPnLBeforeCloseRef.current = totalPnL;
-
-    setIsClosing(true);
-    isClosingRef.current = true;
-    closeStartTimeRef.current = Date.now();
-    addRaw(`[CLOSE START] Trigger=${trigger}, positions=${positions.length}, totalPnL=${totalPnL.toFixed(2)}`);
-
-    // ─── ALWAYS reset isClosing when done ─────────────────────
-    const cleanup = () => {
-      if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
-      closingTimeoutRef.current = setTimeout(() => {
-        if (connGenRef.current !== myGen) return; // stale session
-        setIsClosing(false);
-        isClosingRef.current = false;
-        addRaw("[CLOSE] isClosing reseteado");
-      }, 2000);
-    };
-
-    try {
-      if (isDemo) {
-        addLog("CIERRE", `Cerradas ${positions.length} posiciones por ${trigger} (DEMO)`);
-        setPositions([]);
-        setTotalPnL(0);
-        return;
-      }
-
-      if (selectedBroker === "deriv") {
-        let closed = 0;
-        for (const pos of positions) {
-          if (isStale()) { addRaw("[CLOSE ABORT] stale session (deriv)"); return; }
-          try {
-            wsRef.current?.send(JSON.stringify({ sell: pos.id, price: 0, req_id: reqIdRef.current++ }));
-            closed++;
-          } catch { /* ignore */ }
-        }
-        addLog("CIERRE", `Cerradas ${closed} posiciones por ${trigger}`);
-        setTimeout(refreshData, 1000);
-      } else if (selectedBroker === "ig") {
-        let closed = 0;
-        let failed = 0;
-        for (const pos of positions) {
-          if (isStale()) { addRaw("[CLOSE ABORT] stale session (ig loop)"); return; }
-          let attempt = 0;
-          let success = false;
-          const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
-          let closeBody: any = {
-            direction: closeDirection,
-            size: pos.size,
-            orderType: "MARKET",
-            timeInForce: "EXECUTE_AND_ELIMINATE",
-          };
-          if (pos.dealId && pos.dealId.length > 0) {
-            closeBody.dealId = pos.dealId;
-          } else {
-            closeBody.epic = pos.epic || pos.symbol;
-            closeBody.expiry = pos.expiry || "-";
-          }
-
-          while (attempt < 3 && !success) {
-            attempt++;
-            try {
-              addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | body=${JSON.stringify(closeBody)}`);
-              const result = await igRequest("/positions/otc", "DELETE", closeBody);
-              if (isStale()) { addRaw("[CLOSE ABORT] stale after IG response"); return; }
-              addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 200)}`);
-              closed++;
-              success = true;
-            } catch (e: any) {
-              addRaw(`[IG CLOSE FAIL v${attempt}] ${pos.symbol}: ${e.message}`);
-              // If dealId failed, try with epic+expiry on next attempt
-              if (attempt === 1 && pos.dealId) {
-                addRaw(`[IG CLOSE FALLBACK] Intentando con epic+expiry...`);
-                closeBody = {
-                  direction: closeDirection,
-                  size: pos.size,
-                  orderType: "MARKET",
-                  timeInForce: "EXECUTE_AND_ELIMINATE",
-                  epic: pos.epic || pos.symbol,
-                  expiry: pos.expiry || "-",
-                };
-              }
-              if (attempt < 3) {
-                addRaw(`[IG CLOSE RETRY] ${pos.symbol} en 1s...`);
-                await new Promise(r => setTimeout(r, 1000));
-              } else {
-                failed++;
-              }
-            }
-          }
-        }
-        addLog("CIERRE", `Cerradas ${closed}/${positions.length} posiciones por ${trigger} (${failed} fallos)`);
-        setTimeout(refreshData, 3000);
-      }
-    } catch (e: any) {
-      addRaw(`[CLOSE ERROR] ${e.message}`);
-    } finally {
-      cleanup();
-    }
-  }, [isConnected, positions, isDemo, selectedBroker, totalPnL, addLog, addRaw, refreshData, igRequest]);
+  // NOTE: Position closing is handled by the Python risk engine.
+  // This web panel is read-only for monitoring + configuration only.
 
   // Auto-connect on mount for Deriv (legacy behavior)
   useEffect(() => {
@@ -859,56 +726,41 @@ export default function BrokerPanel() {
   }, [positions, currency, addLog]);
 
   // ═══════════════════════════════════════════════════════════════
-  //  AUTOMATED PROTECTION — Trailing Stop & Drawdown Limits
+  //  PROTECTION MONITOR — Web panel only DISPLAYS alerts.
+  //  Actual position closing is handled by the Python risk engine.
   // ═══════════════════════════════════════════════════════════════
   const runProtectionCheck = useCallback(() => {
-    if (!protection.isActive || !isConnected) {
-      addRaw(`[PROTECTION SKIP] isActive=${protection.isActive}, isConnected=${isConnected}`);
-      return false;
-    }
+    if (!protection.isActive || !isConnected) return false;
+    if (positions.length === 0) return false;
 
-    // GUARD: skip if already closing
-    if (isClosingRef.current || positions.length === 0) return false;
-
-    // 1. DAILY LIMIT — uses ONLY realized losses from closed trades
+    // 1. DAILY LIMIT — show alert only
     if (initialBalance && balance !== null) {
       const dailyLimit = initialBalance * (protection.dailyLimitPct / 100);
       if (realizedDailyLoss >= dailyLimit) {
-        addLog("PROTECCIÓN", `Límite diario alcanzado: pérdida realizada ${realizedDailyLoss.toFixed(2)} >= ${dailyLimit.toFixed(2)} ${currency}. Cerrando todo.`);
-        executeCloseAll("LÍMITE DIARIO");
+        addLog("ALERTA", `Límite diario alcanzado: ${realizedDailyLoss.toFixed(2)} / ${dailyLimit.toFixed(2)} ${currency}. El motor Python debe cerrar posiciones.`);
         return true;
       }
     }
 
-    // 2. TRAILING STOP
+    // 2. TRAILING STOP — show alert only
     if (protection.trailingEnabled && !trailingFired) {
       const threshold = balance ? balance * 0.01 : 0;
       if (totalPnL >= threshold && peakPnL > 0) {
         const stopLevel = peakPnL * (protection.trailingProtectPct / 100);
         if (totalPnL <= stopLevel) {
           setTrailingFired(true);
-          addLog("PROTECCIÓN", `Trailing Stop activado: ganancias cayeron de +${peakPnL.toFixed(2)} a +${totalPnL.toFixed(2)} ${currency}. Cerrando todo.`);
-          executeCloseAll("TRAILING STOP");
+          addLog("ALERTA", `Trailing Stop activado: peak ${peakPnL.toFixed(2)} → actual ${totalPnL.toFixed(2)} ${currency}. El motor Python debe cerrar posiciones.`);
           return true;
         }
       }
     }
     return false;
-  }, [protection, isConnected, initialBalance, balance, realizedDailyLoss, totalPnL, positions.length, currency, trailingFired, peakPnL, addLog, addRaw, executeCloseAll]);
+  }, [protection, isConnected, initialBalance, balance, realizedDailyLoss, totalPnL, positions.length, currency, trailingFired, peakPnL, addLog]);
 
-  // Run protection check whenever data changes
+  // Show protection alerts whenever data changes
   useEffect(() => {
     runProtectionCheck();
   }, [balance, totalPnL, peakPnL, positions.length, runProtectionCheck]);
-
-  // Also run protection check every 1 second as safety net
-  useEffect(() => {
-    if (!isConnected) return;
-    const interval = setInterval(() => {
-      runProtectionCheck();
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isConnected, runProtectionCheck]);
 
   // Auto-set initialBalance if null but balance is available
   useEffect(() => {
@@ -1441,25 +1293,23 @@ export default function BrokerPanel() {
               )}
             </div>
 
-            <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-5">
-              <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-red-400">
-                <AlertTriangle className="h-4 w-4" /> CONTROLES DE EMERGENCIA
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-5">
+              <h2 className="mb-4 flex items-center gap-2 text-sm font-bold text-emerald-400">
+                <Shield className="h-4 w-4" /> ESTADO DEL MOTOR DE RIESGO
               </h2>
-              <div className="grid grid-cols-3 gap-3">
-                <button onClick={closeAllPositions} disabled={!isConnected || positions.length === 0 || isClosing}
-                  className="flex items-center justify-center gap-2 rounded-lg bg-red-500 px-4 py-3 text-sm font-bold text-white hover:bg-red-600 transition-colors disabled:opacity-50">
-                  {isClosing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
-                  {isClosing ? "Cerrando..." : "Cerrar todo"}
-                </button>
-                <button onClick={runProtectionCheck} disabled={!isConnected || isClosing}
-                  className="flex items-center justify-center gap-2 rounded-lg bg-orange-500 px-4 py-3 text-sm font-bold text-white hover:bg-orange-600 transition-colors disabled:opacity-50">
-                  <Shield className="h-4 w-4" /> Forzar protección
+              <div className="grid grid-cols-2 gap-3">
+                <button onClick={runProtectionCheck} disabled={!isConnected}
+                  className="flex items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-600 transition-colors disabled:opacity-50">
+                  <Shield className="h-4 w-4" /> Verificar protección
                 </button>
                 <button onClick={refreshData} disabled={!isConnected}
                   className="flex items-center justify-center gap-2 rounded-lg border border-gs-border/60 px-4 py-3 text-sm font-bold text-gs-muted hover:bg-gs-surface/30 transition-colors disabled:opacity-50">
-                  <RefreshCw className="h-4 w-4" /> Refrescar
+                  <RefreshCw className="h-4 w-4" /> Refrescar datos
                 </button>
               </div>
+              <p className="mt-3 text-xs text-gs-muted">
+                El cierre de posiciones lo realiza el motor Python en el servidor. Este panel solo monitorea y configura.
+              </p>
             </div>
           </div>
 
