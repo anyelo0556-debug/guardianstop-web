@@ -154,6 +154,8 @@ export default function BrokerPanel() {
   const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeStartTimeRef = useRef<number>(0);
   const isClosingRef = useRef(false);
+  // Connection generation: increments on every connect/disconnect to invalidate stale async ops
+  const connGenRef = useRef(0);
 
   // ─── Helpers ────────────────────────────────────────────────
   const addLog = useCallback((action: string, message: string) => {
@@ -169,6 +171,7 @@ export default function BrokerPanel() {
   }, []);
 
   const clearConnection = useCallback(() => {
+    connGenRef.current++; // invalidate all in-flight async ops
     wsRef.current?.close();
     wsRef.current = null;
     if (igRefreshTimerRef.current) clearTimeout(igRefreshTimerRef.current);
@@ -507,9 +510,13 @@ export default function BrokerPanel() {
   }, [igRefreshSession, addRaw]);
 
   const igFetchData = useCallback(async () => {
+    const myGen = connGenRef.current; // capture generation at start
+    const isStale = () => connGenRef.current !== myGen;
+
     try {
       // Fetch accounts
       const accountsRes = await igRequest("/accounts", "GET");
+      if (isStale()) return; // abort if disconnected/reconnected
       addRaw(`[IG ACCOUNTS] ${JSON.stringify(accountsRes).slice(0, 400)}`);
 
       const accounts = accountsRes.accounts || [];
@@ -517,8 +524,10 @@ export default function BrokerPanel() {
 
       if (activeAccount) {
         const bal = Number(activeAccount.balance?.balance ?? activeAccount.balance?.available ?? 0);
+        if (isStale()) return;
         setBalance(bal);
         setInitialBalance((prev) => {
+          if (isStale()) return prev; // don't update if stale
           if (prev === null) {
             addRaw(`[IG] initialBalance SET to ${bal} ${activeAccount.currency || "USD"} (session start)`);
             balanceBeforeCloseRef.current = bal;
@@ -526,6 +535,7 @@ export default function BrokerPanel() {
           }
           return prev;
         });
+        if (isStale()) return;
         setCurrency(activeAccount.currency || "USD");
         addRaw(`[IG] Account ${activeAccount.accountId} | Balance: ${bal} ${activeAccount.currency}`);
       } else {
@@ -534,6 +544,7 @@ export default function BrokerPanel() {
 
       // Fetch positions
       const posRes = await igRequest("/positions", "GET");
+      if (isStale()) return;
       addRaw(`[IG POSITIONS] ${JSON.stringify(posRes).slice(0, 400)}`);
       const posList = posRes.positions || [];
       let runningPnL = 0;
@@ -541,20 +552,15 @@ export default function BrokerPanel() {
         const market = p.market || {};
         const pos = p.position || {};
         const direction = (pos.direction || "BUY").toUpperCase();
-        // IG uses dealSize for CFDs, size may be contract multiplier
         const size = Number(pos.dealSize || pos.size || pos.contractSize || 1);
-        // Parse open level robustly — IG sends it as string sometimes
         const openPrice = Number(pos.level ?? pos.openLevel ?? pos.openPrice ?? 0);
         const bid = Number(market.bid ?? 0);
         const offer = Number(market.offer ?? 0);
         const currentPrice = direction === "BUY" ? (bid || offer) : (offer || bid);
-        // For CFDs: P&L = (exit - entry) * size * pointValue
-        // For index CFDs pointValue is typically 1 USD per point per contract
         const priceDiff = direction === "BUY" ? (currentPrice - openPrice) : (openPrice - currentPrice);
         const profit = priceDiff * size;
         const profitPct = openPrice > 0 ? (priceDiff / openPrice) * 100 : 0;
         runningPnL += profit;
-        addRaw(`[IG POS] ${market.instrumentName || market.epic} | ${direction} ${size} @ ${openPrice.toFixed(2)} | Now: ${currentPrice.toFixed(2)} | P&L: ${profit.toFixed(2)}`);
         return {
           id: pos.dealId || pos.dealReference || String(Math.random()),
           symbol: market.instrumentName || market.epic || "UNKNOWN",
@@ -569,9 +575,11 @@ export default function BrokerPanel() {
           expiry: market.expiry || "-",
         };
       });
+      if (isStale()) return;
       setPositions(mappedPositions);
       setTotalPnL(runningPnL);
       addRaw(`[IG] ${posList.length} posiciones | P&L Total: ${runningPnL.toFixed(2)} ${currency}`);
+      if (isStale()) return;
       setLastUpdated(new Date());
     } catch (e: any) {
       addRaw(`[IG POLL ERROR] ${e.message}`);
@@ -657,6 +665,9 @@ export default function BrokerPanel() {
   }, [isConnected, positions, addLog]);
 
   const executeCloseAll = useCallback(async (trigger: string) => {
+    const myGen = connGenRef.current;
+    const isStale = () => connGenRef.current !== myGen;
+
     // Force reset if stuck for more than 15 seconds
     const elapsed = Date.now() - closeStartTimeRef.current;
     if (isClosingRef.current && elapsed > 15000) {
@@ -680,6 +691,7 @@ export default function BrokerPanel() {
 
     // Hard safety: force reset isClosing after 15 seconds no matter what
     const hardResetTimeout = setTimeout(() => {
+      if (connGenRef.current !== myGen) return; // stale, don't touch
       if (isClosingRef.current) {
         addRaw("[CLOSE HARD RESET] 15s timeout reached, forcing isClosing=false");
         setIsClosing(false);
@@ -698,17 +710,20 @@ export default function BrokerPanel() {
       if (selectedBroker === "deriv") {
         let closed = 0;
         for (const pos of positions) {
+          if (isStale()) return;
           try {
             wsRef.current?.send(JSON.stringify({ sell: pos.id, price: 0, req_id: reqIdRef.current++ }));
             closed++;
           } catch { /* ignore */ }
         }
+        if (isStale()) return;
         addLog("CIERRE", `Cerradas ${closed} posiciones por ${trigger}`);
         setTimeout(refreshData, 1000);
       } else if (selectedBroker === "ig") {
         let closed = 0;
         let failed = 0;
         for (const pos of positions) {
+          if (isStale()) return;
           let attempt = 0;
           let success = false;
           const closeDirection = pos.direction === "BUY" ? "SELL" : "BUY";
@@ -730,6 +745,7 @@ export default function BrokerPanel() {
             try {
               addRaw(`[IG CLOSE v${attempt}] ${pos.symbol} | ${closeDirection} ${pos.size} | body=${JSON.stringify(closeBody)}`);
               const result = await igRequest("/positions/otc", "DELETE", closeBody);
+              if (isStale()) return;
               addRaw(`[IG CLOSE OK v${attempt}] ${pos.symbol} | result: ${JSON.stringify(result).slice(0, 200)}`);
               closed++;
               success = true;
@@ -757,14 +773,17 @@ export default function BrokerPanel() {
             }
           }
         }
+        if (isStale()) return;
         addLog("CIERRE", `Cerradas ${closed}/${positions.length} posiciones por ${trigger} (${failed} fallos)`);
         setTimeout(refreshData, 3000);
       }
     } finally {
       clearTimeout(hardResetTimeout);
+      if (isStale()) return; // don't reset isClosing if stale
       // Reset isClosing immediately (or after short delay for UI feedback)
       if (closingTimeoutRef.current) clearTimeout(closingTimeoutRef.current);
       closingTimeoutRef.current = setTimeout(() => {
+        if (connGenRef.current !== myGen) return;
         setIsClosing(false);
         isClosingRef.current = false;
         addRaw("[CLOSE] isClosing reseteado");
