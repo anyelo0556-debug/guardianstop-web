@@ -8,6 +8,7 @@ import BrokerPanel from "@/pages/BrokerPanel";
 import Dashboard from "@/pages/Dashboard";
 import PrivacyPage from "@/pages/PrivacyPage";
 import ArchitecturePage from "@/pages/ArchitecturePage";
+import History from "@/pages/History";
 import AdminDashboard from "@/sections/AdminDashboard";
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/architecture" element={<ArchitecturePage />} />
+      <Route path="/history" element={<History />} />
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
