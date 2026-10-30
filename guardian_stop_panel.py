@@ -126,22 +126,38 @@ class RiskEngine:
                 r = requests.get(f"{BASE_URL}/positions", headers=self.headers(), timeout=15)
             if r.status_code == 200:
                 out = []
-                for p in r.json().get("positions", []):
+                data = r.json()
+                # Guardar respuesta cruda para debug
+                with open("_last_positions.json", "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+                for p in data.get("positions", []):
                     m = p.get("market", {})
                     pos = p.get("position", {})
                     size = float(pos.get("dealSize", pos.get("size", 0)))
+                    # IG puede tener el P&L en varios campos
+                    profit = 0.0
+                    for field in ["unrealisedProfit", "unrealisedProfitLoss", "profit", "upl", "unrealisedPnl"]:
+                        val = p.get(field, pos.get(field))
+                        if val is not None:
+                            try:
+                                profit = float(val)
+                                break
+                            except:
+                                continue
+                    deal_id = pos.get("dealId", "") or pos.get("dealReference", "")
                     out.append({
-                        "id": pos.get("dealId", ""),
+                        "id": deal_id,
                         "epic": m.get("epic", ""),
                         "name": m.get("instrumentName", pos.get("instrumentName", "Unknown")),
                         "dir": pos.get("direction", ""),
                         "size": size,
                         "open": float(pos.get("openLevel", 0)),
-                        "profit": float(p.get("unrealisedProfit", 0) or 0),
+                        "profit": profit,
                     })
                 return out
             return []
         except Exception as e:
+            print(f"[ERROR fetch_positions] {e}")
             return []
 
     def close_position(self, pos):
@@ -149,22 +165,53 @@ class RiskEngine:
         epic = pos.get("epic", "")
         direction = pos.get("dir", "")
         size = pos.get("size", 0)
+        name = pos.get("name", "Unknown")
         if size <= 0:
-            return False, f"Size=0, no se puede cerrar {pos['name']}"
+            return False, f"Size=0, no se puede cerrar {name}"
         close_dir = "SELL" if direction == "BUY" else "BUY"
-        body = {"direction": close_dir, "size": size, "orderType": "MARKET", "timeInForce": "EXECUTE_AND_ELIMINATE"}
+
+        # IG requiere header Version para cierre
+        h = self.headers()
+        h["Version"] = "1"
+
+        # Intento 1: con dealId
         if deal:
-            body["dealId"] = deal
-        else:
-            body["epic"] = epic
-            body["expiry"] = "-"
-        try:
-            r = requests.delete(f"{BASE_URL}/positions/otc", headers=self.headers(), json=body, timeout=15)
-            if r.status_code in (200, 202):
-                return True, f"Cerrado: {pos['name']} {close_dir} x{size}"
-            return False, f"Falló cerrar {pos['name']}: {r.status_code}"
-        except Exception as e:
-            return False, f"Error cerrando {pos['name']}: {e}"
+            body = {
+                "dealId": deal,
+                "direction": close_dir,
+                "size": size,
+                "orderType": "MARKET",
+                "timeInForce": "EXECUTE_AND_ELIMINATE",
+            }
+            try:
+                print(f"[CLOSE] Intentando dealId={deal[:20]}... {close_dir} x{size}")
+                r = requests.delete(f"{BASE_URL}/positions/otc", headers=h, json=body, timeout=15)
+                print(f"[CLOSE] dealId status: {r.status_code} | {r.text[:100]}")
+                if r.status_code in (200, 202):
+                    return True, f"Cerrado: {name} {close_dir} x{size}"
+            except Exception as e:
+                print(f"[CLOSE] dealId error: {e}")
+
+        # Intento 2: con epic+expiry
+        if epic:
+            body = {
+                "epic": epic,
+                "expiry": "-",
+                "direction": close_dir,
+                "size": size,
+                "orderType": "MARKET",
+                "timeInForce": "EXECUTE_AND_ELIMINATE",
+            }
+            try:
+                print(f"[CLOSE] Intentando epic={epic} fallback...")
+                r = requests.delete(f"{BASE_URL}/positions/otc", headers=h, json=body, timeout=15)
+                print(f"[CLOSE] epic status: {r.status_code} | {r.text[:100]}")
+                if r.status_code in (200, 202):
+                    return True, f"Cerrado: {name} {close_dir} x{size} (epic)"
+            except Exception as e:
+                print(f"[CLOSE] epic error: {e}")
+
+        return False, f"Falló cerrar {name}: no dealId ni epic válidos"
 
     def close_all(self, reason):
         results = []
