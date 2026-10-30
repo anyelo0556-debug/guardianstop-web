@@ -7,11 +7,9 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 
 COMO USAR:
-1. Instala Python 3.10+ en tu laptop
-2. Instala requests:  pip install requests
-3. Edita las credenciales IG abajo (API_KEY, USERNAME, PASSWORD)
-4. Corre:  python demo_motor_riesgo.py
-5. Abre trades en IG Demo y deja que pierdan — el motor las cerrará
+1. Edita las credenciales IG abajo
+2. Corre:  python demo_motor_riesgo.py
+3. Abre trades en IG Demo — el motor las cerrará al alcanzar el límite
 """
 
 import requests
@@ -22,18 +20,16 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════════════════════
 # CONFIGURA TUS CREDENCIALES IG DEMO AQUÍ
 # ═══════════════════════════════════════════════════════════════════════
-IG_API_KEY     = "PON_TU_API_KEY_AQUI"      # X-IG-API-KEY
-IG_USERNAME    = "PON_TU_USUARIO_AQUI"      # Usuario IG
-IG_PASSWORD    = "PON_TU_PASSWORD_AQUI"     # Contraseña IG
-IG_DEMO        = True                        # True = cuenta demo
+IG_API_KEY     = "37f75d11dece9df84f62be9829e5e41a794ff42a"
+IG_USERNAME    = "angel0556d"
+IG_PASSWORD    = "7@95W46vcvHsr7a"
+IG_DEMO        = True
 
-# LÍMITES DE RIESGO (porcentajes)
-DAILY_LIMIT_PCT    = 1.0   # 1% del balance inicial
-WEEKLY_LIMIT_PCT   = 10.0  # 10% del balance inicial
-MONTHLY_LIMIT_PCT  = 30.0  # 30% del balance inicial
+# LÍMITES DE RIESGO
+DAILY_LIMIT_PCT    = 1.0
 TRAILING_ENABLED   = True
-TRAILING_ACTIVATION_PCT = 1.0   # Activa trailing cuando ganas 1%
-TRAILING_PROTECTION_PCT = 30.0  # Protege el 30% del pico de ganancias
+TRAILING_ACTIVATION_PCT = 1.0
+TRAILING_PROTECTION_PCT = 30.0
 
 # INTERVALO DE MONITOREO (segundos)
 POLL_INTERVAL = 5
@@ -44,272 +40,231 @@ POLL_INTERVAL = 5
 
 BASE_URL = "https://demo-api.ig.com/gateway/deal" if IG_DEMO else "https://api.ig.com/gateway/deal"
 
-class Colors:
-    GREEN  = "\033[92m"
-    RED    = "\033[91m"
-    YELLOW = "\033[93m"
-    CYAN   = "\033[96m"
-    BOLD   = "\033[1m"
-    RESET  = "\033[0m"
+class C:
+    G = "\033[92m"   # Verde
+    R = "\033[91m"   # Rojo
+    Y = "\033[93m"   # Amarillo
+    C = "\033[96m"   # Cyan
+    B = "\033[1m"    # Bold
+    X = "\033[0m"    # Reset
 
-def log(msg, color=Colors.RESET):
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"{color}[{ts}] {msg}{Colors.RESET}")
+def ts():
+    return datetime.now().strftime("%H:%M:%S")
 
-class IGRiskEngine:
+class Engine:
     def __init__(self):
         self.cst = None
         self.xst = None
-        self.account_id = None
-        self.initial_balance = 0.0
-        self.peak_pnl = 0.0
+        self.acc = None
+        self.initial_bal = 0.0
+        self.peak = 0.0
         self.trailing_fired = False
-        self.session_closed_pnl = 0.0  # Acumulado de pérdidas realizadas
-        self.closed_deals = set()      # Para no contar doble
+        self.realized = 0.0
+        self.closed_ids = set()
+        self.last_pos_count = -1
+        self.last_pos_detail = ""
 
-    def _headers(self):
-        h = {
-            "X-IG-API-KEY": IG_API_KEY,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        if self.cst:
-            h["CST"] = self.cst
-        if self.xst:
-            h["X-SECURITY-TOKEN"] = self.xst
+    def hdr(self):
+        h = {"X-IG-API-KEY": IG_API_KEY, "Content-Type": "application/json", "Accept": "application/json"}
+        if self.cst: h["CST"] = self.cst
+        if self.xst: h["X-SECURITY-TOKEN"] = self.xst
         return h
 
     def login(self):
-        log("Conectando a IG...", Colors.CYAN)
+        print(f"[{ts()}] {C.C}Conectando a IG...{C.X}")
         try:
-            resp = requests.post(
-                f"{BASE_URL}/session",
-                headers=self._headers(),
-                json={"identifier": IG_USERNAME, "password": IG_PASSWORD},
-                params={"fetchSessionTokens": "true"},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                self.cst = resp.headers.get("CST")
-                self.xst = resp.headers.get("X-SECURITY-TOKEN")
-                data = resp.json()
-                accounts = data.get("accounts", [])
-                if accounts:
-                    spread = next((a for a in accounts if a.get("accountType") == "SPREADBET"), None)
-                    cfd = next((a for a in accounts if a.get("accountType") == "CFD"), None)
-                    self.account_id = spread["accountId"] if spread else (cfd["accountId"] if cfd else accounts[0]["accountId"])
-                log(f"Login OK | Account: {self.account_id}", Colors.GREEN)
+            r = requests.post(f"{BASE_URL}/session", headers=self.hdr(),
+                              json={"identifier": IG_USERNAME, "password": IG_PASSWORD},
+                              params={"fetchSessionTokens": "true"}, timeout=15)
+            if r.status_code == 200:
+                self.cst = r.headers.get("CST")
+                self.xst = r.headers.get("X-SECURITY-TOKEN")
+                data = r.json()
+                accs = data.get("accounts", [])
+                if accs:
+                    spread = next((a for a in accs if a.get("accountType") == "SPREADBET"), None)
+                    cfd = next((a for a in accs if a.get("accountType") == "CFD"), None)
+                    self.acc = spread["accountId"] if spread else (cfd["accountId"] if cfd else accs[0]["accountId"])
+                print(f"[{ts()}] {C.G}Login OK | Cuenta: {self.acc}{C.X}")
                 return True
             else:
-                log(f"Login FALLÓ: {resp.status_code} {resp.text[:200]}", Colors.RED)
+                print(f"[{ts()}] {C.R}Login FALLÓ: {r.status_code}{C.X}")
                 return False
         except Exception as e:
-            log(f"Login ERROR: {e}", Colors.RED)
+            print(f"[{ts()}] {C.R}Login ERROR: {e}{C.X}")
             return False
 
-    def get_balance(self):
+    def balance(self):
         try:
-            resp = requests.get(f"{BASE_URL}/accounts", headers=self._headers(), timeout=15)
-            if resp.status_code == 401:
-                if not self.login():
-                    return None
-                resp = requests.get(f"{BASE_URL}/accounts", headers=self._headers(), timeout=15)
-            if resp.status_code == 200:
-                for acc in resp.json().get("accounts", []):
-                    if acc.get("accountId") == self.account_id:
+            r = requests.get(f"{BASE_URL}/accounts", headers=self.hdr(), timeout=15)
+            if r.status_code == 401:
+                if not self.login(): return None
+                r = requests.get(f"{BASE_URL}/accounts", headers=self.hdr(), timeout=15)
+            if r.status_code == 200:
+                for a in r.json().get("accounts", []):
+                    if a.get("accountId") == self.acc:
                         return {
-                            "balance": float(acc["balance"]["balance"]),
-                            "available": float(acc["balance"]["available"]),
-                            "profitLoss": float(acc["balance"]["profitLoss"]),
+                            "balance": float(a["balance"]["balance"]),
+                            "available": float(a["balance"]["available"]),
+                            "pnl": float(a["balance"]["profitLoss"]),
                         }
             return None
         except Exception as e:
-            log(f"Balance ERROR: {e}", Colors.RED)
+            print(f"[{ts()}] {C.R}Balance ERROR: {e}{C.X}")
             return None
 
-    def get_positions(self):
+    def positions(self):
         try:
-            resp = requests.get(f"{BASE_URL}/positions", headers=self._headers(), timeout=15)
-            if resp.status_code == 401:
-                if not self.login():
-                    return []
-                resp = requests.get(f"{BASE_URL}/positions", headers=self._headers(), timeout=15)
-            if resp.status_code == 200:
-                positions = []
-                for p in resp.json().get("positions", []):
-                    market = p.get("market", {})
+            r = requests.get(f"{BASE_URL}/positions", headers=self.hdr(), timeout=15)
+            if r.status_code == 401:
+                if not self.login(): return []
+                r = requests.get(f"{BASE_URL}/positions", headers=self.hdr(), timeout=15)
+            if r.status_code == 200:
+                out = []
+                for p in r.json().get("positions", []):
+                    m = p.get("market", {})
                     pos = p.get("position", {})
-                    positions.append({
-                        "dealId": pos.get("dealId", ""),
-                        "epic": market.get("epic", ""),
-                        "name": market.get("instrumentName", ""),
-                        "direction": pos.get("direction", ""),
-                        "size": float(pos.get("size", 0)),
-                        "openLevel": float(pos.get("openLevel", 0)),
+                    # IG usa dealSize; fallback a size
+                    size = float(pos.get("dealSize", pos.get("size", 0)))
+                    out.append({
+                        "id": pos.get("dealId", ""),
+                        "epic": m.get("epic", ""),
+                        "name": m.get("instrumentName", ""),
+                        "dir": pos.get("direction", ""),
+                        "size": size,
                         "profit": float(p.get("unrealisedProfit", 0) or 0),
                     })
-                return positions
+                return out
             return []
         except Exception as e:
-            log(f"Positions ERROR: {e}", Colors.RED)
+            print(f"[{ts()}] {C.R}Posiciones ERROR: {e}{C.X}")
             return []
 
-    def close_position(self, pos):
-        deal_id = pos.get("dealId", "")
+    def close_one(self, pos):
+        deal = pos.get("id", "")
         epic = pos.get("epic", "")
-        direction = pos.get("direction", "")
+        direction = pos.get("dir", "")
         size = pos.get("size", 0)
+        if size <= 0:
+            print(f"[{ts()}] {C.R}ERROR: size=0, no se puede cerrar {pos['name']}{C.X}")
+            return False
         close_dir = "SELL" if direction == "BUY" else "BUY"
-
-        body = {
-            "direction": close_dir,
-            "size": size,
-            "orderType": "MARKET",
-            "timeInForce": "EXECUTE_AND_ELIMINATE",
-        }
-        if deal_id:
-            body["dealId"] = deal_id
+        body = {"direction": close_dir, "size": size, "orderType": "MARKET", "timeInForce": "EXECUTE_AND_ELIMINATE"}
+        if deal:
+            body["dealId"] = deal
         else:
             body["epic"] = epic
             body["expiry"] = "-"
-
         try:
-            log(f"CERRANDO {pos['name']} | {close_dir} {size} | dealId={deal_id[:12] if deal_id else 'none'}...", Colors.RED)
-            resp = requests.delete(f"{BASE_URL}/positions/otc", headers=self._headers(), json=body, timeout=15)
-            if resp.status_code in (200, 202):
-                log(f"CERRADO OK: {pos['name']}", Colors.GREEN)
+            print(f"[{ts()}] {C.R}CERRANDO {pos['name']} | {close_dir} {size} | dealId={deal[:12] if deal else 'none'}...{C.X}")
+            r = requests.delete(f"{BASE_URL}/positions/otc", headers=self.hdr(), json=body, timeout=15)
+            if r.status_code in (200, 202):
+                print(f"[{ts()}] {C.G}CERRADO OK: {pos['name']}{C.X}")
                 return True
             else:
-                log(f"CERRAR FALLÓ {pos['name']}: {resp.status_code}", Colors.RED)
+                print(f"[{ts()}] {C.R}CERRAR FALLÓ {pos['name']}: {r.status_code}{C.X}")
                 return False
         except Exception as e:
-            log(f"CERRAR ERROR {pos['name']}: {e}", Colors.RED)
+            print(f"[{ts()}] {C.R}CERRAR ERROR {pos['name']}: {e}{C.X}")
             return False
 
     def close_all(self, positions, reason):
-        log(f"{'='*60}", Colors.RED)
-        log(f"PROTECCIÓN ACTIVADA: {reason}", Colors.RED + Colors.BOLD)
-        log(f"Cerrando {len(positions)} posiciones...", Colors.RED)
-        log(f"{'='*60}", Colors.RED)
+        print(f"\n{C.R}{'='*60}{C.X}")
+        print(f"{C.R}{C.B} PROTECCIÓN ACTIVADA: {reason}{C.X}")
+        print(f"{C.R}{'='*60}{C.X}")
         closed = 0
         for pos in positions:
-            if self.close_position(pos):
+            if self.close_one(pos):
                 closed += 1
-                # Track realized loss
-                if pos["dealId"] and pos["dealId"] not in self.closed_deals:
-                    self.closed_deals.add(pos["dealId"])
+                if pos["id"] and pos["id"] not in self.closed_ids:
+                    self.closed_ids.add(pos["id"])
                     if pos["profit"] < 0:
-                        self.session_closed_pnl += abs(pos["profit"])
+                        self.realized += abs(pos["profit"])
             time.sleep(0.5)
-        log(f"Cerradas {closed}/{len(positions)} posiciones", Colors.GREEN if closed == len(positions) else Colors.YELLOW)
+        print(f"[{ts()}] {C.G if closed == len(positions) else C.Y}Cerradas {closed}/{len(positions)} posiciones{C.X}\n")
         return closed
 
     def run(self):
-        log("="*60, Colors.CYAN)
-        log("  GUARDIAN STOP — MOTOR DE RIESGO (DEMO EN VIVO)", Colors.CYAN + Colors.BOLD)
-        log("  Presiona Ctrl+C para detener", Colors.CYAN)
-        log("="*60, Colors.CYAN)
+        print(f"\n{'='*60}")
+        print(f"  GUARDIAN STOP — MOTOR DE RIESGO")
+        print(f"  Presiona Ctrl+C para detener")
+        print(f"{'='*60}\n")
 
         if not self.login():
-            log("No se pudo conectar. Verifica credenciales.", Colors.RED)
             sys.exit(1)
 
-        # Get initial balance
-        bal = self.get_balance()
+        bal = self.balance()
         if not bal:
-            log("No se pudo obtener balance inicial.", Colors.RED)
+            print(f"[{ts()}] {C.R}No se pudo obtener balance.{C.X}")
             sys.exit(1)
 
-        self.initial_balance = bal["balance"]
-        daily_limit = self.initial_balance * (DAILY_LIMIT_PCT / 100)
+        self.initial_bal = bal["balance"]
+        daily_limit = self.initial_bal * (DAILY_LIMIT_PCT / 100)
 
-        log(f"Balance inicial: {self.initial_balance:.2f} USD", Colors.GREEN)
-        log(f"Límite diario ({DAILY_LIMIT_PCT}%): {daily_limit:.2f} USD", Colors.YELLOW)
-        log(f"Intervalo de monitoreo: {POLL_INTERVAL} segundos", Colors.CYAN)
-        log("Abre trades en IG Demo y deja que pierdan...", Colors.CYAN)
-        log("="*60, Colors.CYAN)
+        print(f"[{ts()}] {C.G}Balance inicial: {self.initial_bal:.2f} USD{C.X}")
+        print(f"[{ts()}] {C.Y}Límite diario ({DAILY_LIMIT_PCT}%): {daily_limit:.2f} USD{C.X}")
+        print(f"[{ts()}] {C.C}Intervalo: {POLL_INTERVAL}s | Esperando trades...{C.X}\n")
 
         try:
             while True:
-                bal = self.get_balance()
-                positions = self.get_positions()
+                bal = self.balance()
+                pos = self.positions()
 
                 if not bal:
-                    log("Sin datos de balance, reintentando...", Colors.YELLOW)
                     time.sleep(POLL_INTERVAL)
                     continue
 
-                current_balance = bal["balance"]
-                total_pnl = bal["profitLoss"]
-                effective_balance = current_balance + total_pnl
-                drawdown = max(0, self.initial_balance - effective_balance)
-                drawdown_pct = (drawdown / self.initial_balance * 100) if self.initial_balance > 0 else 0
+                current = bal["balance"]
+                pnl = bal["pnl"]
+                eff = current + pnl
+                dd = max(0, self.initial_bal - eff)
+                dd_pct = (dd / self.initial_bal * 100) if self.initial_bal > 0 else 0
 
-                # Track peak P&L for trailing
-                if total_pnl > self.peak_pnl:
-                    self.peak_pnl = total_pnl
+                if pnl > self.peak:
+                    self.peak = pnl
 
-                # Calculate realized daily loss (from closed trades this session)
-                realized_loss = self.session_closed_pnl
-                daily_remaining = max(0, daily_limit - realized_loss)
-                daily_pct_used = min(100, (realized_loss / daily_limit * 100)) if daily_limit > 0 else 0
+                daily_used = min(100, (self.realized / daily_limit * 100)) if daily_limit > 0 else 0
 
-                # Display status
-                pnl_color = Colors.GREEN if total_pnl >= 0 else Colors.RED
-                dd_color = Colors.RESET if drawdown == 0 else Colors.YELLOW if drawdown_pct < 0.5 else Colors.RED
+                # Color del PnL
+                pcol = C.G if pnl >= 0 else C.R
+                # Color del drawdown
+                dcol = C.X if dd == 0 else C.Y if dd_pct < 0.5 else C.R
 
-                status = (
-                    f"Balance: {current_balance:.2f} | "
-                    f"PnL: {pnl_color}{total_pnl:+.2f}{Colors.RESET} | "
-                    f"Pos: {len(positions)} | "
-                    f"DD: {dd_color}{drawdown:.2f} ({drawdown_pct:.2f}%){Colors.RESET} | "
-                    f"Daily: {realized_loss:.2f}/{daily_limit:.2f} ({daily_pct_used:.0f}%)"
-                )
-                log(status)
+                # Línea de estado compacta
+                status = f"[{ts()}] Bal:{current:.0f} | PnL:{pcol}{pnl:+.2f}{C.X} | Pos:{len(pos)} | DD:{dcol}{dd:.2f} ({dd_pct:.2f}%){C.X} | Daily:{self.realized:.2f}/{daily_limit:.2f} ({daily_used:.0f}%)"
+                print(status)
 
-                # Show positions detail
-                for pos in positions:
-                    profit = pos["profit"]
-                    p_col = Colors.GREEN if profit >= 0 else Colors.RED
-                    log(f"  → {pos['name']} {pos['direction']} {pos['size']} | {p_col}{profit:+.2f}{Colors.RESET}")
+                # Mostrar detalle de posiciones SOLO si cambió
+                pos_detail = " | ".join([f"{p['name']} {p['dir']} {p['size']} ({p['profit']:+.2f})" for p in pos])
+                if pos_detail != self.last_pos_detail or len(pos) != self.last_pos_count:
+                    if pos:
+                        for p in pos:
+                            pcol = C.G if p["profit"] >= 0 else C.R
+                            print(f"         → {p['name']} {p['dir']} x{p['size']} | {pcol}{p['profit']:+.2f}{C.X}")
+                    else:
+                        print(f"         → Sin posiciones abiertas")
+                    self.last_pos_detail = pos_detail
+                    self.last_pos_count = len(pos)
 
-                # ═══════════════════════════════════════════════════════════════
-                # PROTECTION CHECKS
-                # ═══════════════════════════════════════════════════════════════
-                if len(positions) > 0:
-                    # 1. DAILY LIMIT
-                    if realized_loss >= daily_limit:
-                        self.close_all(positions, f"LÍMITE DIARIO ALCANZADO ({realized_loss:.2f} >= {daily_limit:.2f})")
+                # PROTECCIÓN
+                if len(pos) > 0:
+                    if self.realized >= daily_limit:
+                        self.close_all(pos, f"LÍMITE DIARIO ({self.realized:.2f} >= {daily_limit:.2f})")
                         continue
 
-                    # 2. WEEKLY LIMIT (simplified: same as daily for demo)
-                    # 3. TRAILING STOP
                     if TRAILING_ENABLED and not self.trailing_fired:
-                        activation = self.initial_balance * (TRAILING_ACTIVATION_PCT / 100)
-                        if total_pnl >= activation and self.peak_pnl > 0:
-                            stop_level = self.peak_pnl * (TRAILING_PROTECTION_PCT / 100)
-                            if total_pnl <= stop_level:
+                        activation = self.initial_bal * (TRAILING_ACTIVATION_PCT / 100)
+                        if pnl >= activation and self.peak > 0:
+                            stop = self.peak * (TRAILING_PROTECTION_PCT / 100)
+                            if pnl <= stop:
                                 self.trailing_fired = True
-                                self.close_all(positions, f"TRAILING STOP (peak={self.peak_pnl:.2f}, current={total_pnl:.2f})")
+                                self.close_all(pos, f"TRAILING STOP (peak={self.peak:.2f} → now={pnl:.2f})")
                                 continue
 
                 time.sleep(POLL_INTERVAL)
 
         except KeyboardInterrupt:
-            log("\nDetenido por usuario.", Colors.YELLOW)
-            log(f"Pérdida realizada en sesión: {self.session_closed_pnl:.2f} USD", Colors.YELLOW)
+            print(f"\n[{ts()}] {C.Y}Detenido. Pérdida realizada: {self.realized:.2f} USD{C.X}")
 
 if __name__ == "__main__":
-    # Validate credentials
-    if IG_API_KEY == "PON_TU_API_KEY_AQUI" or IG_USERNAME == "PON_TU_USUARIO_AQUI":
-        print("\n" + "="*60)
-        print("ERROR: Debes configurar tus credenciales IG en este archivo.")
-        print("Busca estas líneas y rellénalas:")
-        print("  IG_API_KEY  = 'tu_api_key'")
-        print("  IG_USERNAME = 'tu_usuario'")
-        print("  IG_PASSWORD = 'tu_password'")
-        print("="*60 + "\n")
-        sys.exit(1)
-
-    engine = IGRiskEngine()
-    engine.run()
+    Engine().run()
