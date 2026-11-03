@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useLang } from "@/hooks/useLang";
 import { useState } from "react";
-import PaymentModal from "@/components/PaymentModal";
+import { useNavigate } from "react-router";
 
 const pricing = {
   basic: [
@@ -15,23 +15,21 @@ const pricing = {
   ],
   trailing: [
     { days: 30, price: 22.99, perMonth: 22.99, original: null, save: null },
-    { days: 90, price: 62.99, perMonth: 21.00, original: 68.97, save: "9%" },
-    { days: 180, price: 114.99, perMonth: 19.17, original: 137.94, save: "17%", popular: true },
+    { days: 90, price: 62.99, perMonth: 21.00, original: 68.97, save: "9%", popular: true },
+    { days: 180, price: 114.99, perMonth: 19.17, original: 137.94, save: "17%" },
     { days: 365, price: 199.99, perMonth: 16.44, original: 275.88, save: "28%" },
   ],
 };
 
 export default function Plans() {
   const { lang, t } = useLang();
+  const navigate = useNavigate();
   const [mode, setMode] = useState<"basic" | "trailing">("trailing");
-  const [paymentOpen, setPaymentOpen] = useState(false);
-  const [selectedPlan, setSelectedPlan] = useState<{ days: number; price: number } | null>(null);
 
   const plans = pricing[mode];
 
-  const openPayment = (plan: { days: number; price: number }) => {
-    setSelectedPlan(plan);
-    setPaymentOpen(true);
+  const goToRegister = (plan: { days: number; price: number }) => {
+    navigate(`/registro?plan=${mode}&days=${plan.days}&price=${plan.price}`);
   };
 
   return (
@@ -164,7 +162,7 @@ export default function Plans() {
               </div>
 
               <Button
-                onClick={() => openPayment(plan)}
+                onClick={() => goToRegister(plan)}
                 className={`w-full mt-auto rounded-full text-xs font-bold tracking-wide ${
                   plan.popular
                     ? "bg-gs-gold text-gs-bg hover:bg-gs-gold-light"
@@ -177,17 +175,6 @@ export default function Plans() {
           </Card>
         ))}
       </div>
-
-      {/* Payment Modal */}
-      {selectedPlan && (
-        <PaymentModal
-          isOpen={paymentOpen}
-          onClose={() => setPaymentOpen(false)}
-          planType={mode}
-          periodDays={selectedPlan.days}
-          price={String(selectedPlan.price)}
-        />
-      )}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { paymentRouter } from "./payment-router";
 import { derivRouter } from "./deriv-router";
 import { igRouter } from "./ig-router";
 import { credentialsRouter } from "./credentials-router";
+import { registerRouter } from "./register-router";
 import { createRouter, publicQuery } from "./middleware";
 
 export const appRouter = createRouter({
@@ -24,6 +25,7 @@ export const appRouter = createRouter({
   deriv: derivRouter,
   ig: igRouter,
   credentials: credentialsRouter,
+  register: registerRouter,
 });
 
 export type AppRouter = typeof appRouter;

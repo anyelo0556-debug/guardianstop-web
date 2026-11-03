@@ -10,12 +10,16 @@ import PrivacyPage from "@/pages/PrivacyPage";
 import ArchitecturePage from "@/pages/ArchitecturePage";
 import History from "@/pages/History";
 import AdminDashboard from "@/sections/AdminDashboard";
+import Register from "@/pages/Register";
+import Welcome from "@/pages/Welcome";
 
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/login" element={<Login />} />
+      <Route path="/registro" element={<Register />} />
+      <Route path="/bienvenida" element={<Welcome />} />
       <Route path="/payment/success" element={<PaymentSuccess />} />
       <Route path="/payment/cancel" element={<PaymentCancel />} />
       <Route path="/panel" element={<BrokerPanel />} />

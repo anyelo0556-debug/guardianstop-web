@@ -263,5 +263,20 @@ export const stripePrices = mysqlTable("stripe_prices", {
 export type StripePrice = typeof stripePrices.$inferSelect;
 export type InsertStripePrice = typeof stripePrices.$inferInsert;
 
+// ─── EMAIL CREDENTIALS (registro local con email + password) ─────
+export const emailCredentials = mysqlTable("email_credentials", {
+  id: serial("id").primaryKey(),
+  userId: bigint("userId", { mode: "number", unsigned: true })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  email: varchar("email", { length: 320 }).notNull().unique(),
+  passwordHash: text("passwordHash").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+});
+
+export type EmailCredential = typeof emailCredentials.$inferSelect;
+export type InsertEmailCredential = typeof emailCredentials.$inferInsert;
+
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = typeof notifications.$inferInsert;

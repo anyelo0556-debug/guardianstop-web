@@ -2,12 +2,14 @@ import { Check, Zap, Shield, Crown, MessageSquare, RotateCcw, AlertTriangle } fr
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useNavigate } from "react-router";
 
 const plans = [
   {
     name: "Guardian 60",
     days: 60,
     price: 120,
+    planType: "basic" as "basic" | "trailing",
     popular: false,
     features: [
       "Protección FSM en tiempo real",
@@ -21,7 +23,8 @@ const plans = [
     name: "Guardian 90",
     days: 90,
     price: 165,
-    popular: true,
+    planType: "basic" as "basic" | "trailing",
+    popular: false,
     features: [
       "Todo lo de Guardian 60",
       "Psicología de trading avanzada",
@@ -34,6 +37,7 @@ const plans = [
     name: "Guardian 180",
     days: 180,
     price: 290,
+    planType: "trailing" as "basic" | "trailing",
     popular: false,
     features: [
       "Todo lo de Guardian 90",
@@ -47,6 +51,7 @@ const plans = [
     name: "Guardian 365",
     days: 365,
     price: 520,
+    planType: "trailing" as "basic" | "trailing",
     popular: false,
     features: [
       "Todo lo de Guardian 180",
@@ -59,6 +64,8 @@ const plans = [
 ];
 
 export default function PricingPayments() {
+  const navigate = useNavigate();
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-16 md:py-24">
       <div className="mb-10 text-center">
@@ -75,7 +82,7 @@ export default function PricingPayments() {
       <div className="mb-8 flex items-center justify-center gap-2 rounded-lg border border-gs-gold/30 bg-gs-gold/5 px-4 py-3">
         <RotateCcw className="h-4 w-4 text-gs-gold" />
         <span className="text-xs text-gs-text">
-          <strong className="text-gs-gold">Garantía 7 días:</strong> Reembolso total si no estás satisfecho. 
+          <strong className="text-gs-gold">Garantía 7 días:</strong> Reembolso total si no estás satisfecho.
           Día 8 la suscripción se confirma y no aplica devolución.
         </span>
       </div>
@@ -113,6 +120,7 @@ export default function PricingPayments() {
                 ))}
               </ul>
               <Button
+                onClick={() => navigate(`/registro?plan=${plan.planType}&days=${plan.days}&price=${plan.price}`)}
                 className={`w-full text-[11px] font-bold tracking-wide ${
                   plan.popular
                     ? "bg-gs-gold text-gs-bg hover:bg-gs-gold-light"
