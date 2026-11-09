@@ -1,0 +1,28 @@
+# ACTUALIZACION DE DISENO — fondo blanco, letras azules y negras + escudo nuevo
+# Igual que la vez anterior: arrastrar archivos a GitHub y listo. ~5 minutos.
+
+## PASO 1 — Subir a GitHub
+1. Entra a https://github.com/anyelo0556-debug/guardianstop-web
+2. "Add file" -> "Upload files"
+3. Descomprime esta carpeta y selecciona TODO lo que hay dentro:
+      la carpeta  public
+      la carpeta  src
+      la carpeta  api
+      el archivo  tailwind.config.js
+      el archivo  index.html
+4. Arrastralos a la pagina de GitHub y espera a que suban.
+5. "Commit changes".
+
+## PASO 2 — Redesplegar en Render
+1. dashboard.render.com -> guardianstop-web -> "Manual Deploy" -> "Deploy latest commit"
+2. Espera a que diga Live (unos 3-5 minutos).
+
+## PASO 3 — Ver
+1. Abre https://guardianstop-web.onrender.com en una ventana de incognito
+2. Deberias ver: pagina BLANCA, letras NEGRAS, acentos AZULES y el escudo nuevo.
+
+## PENDIENTES ANTERIORES (sin esto guardianstop.com no se actualiza):
+- La base de datos TiDB Cloud sigue probablemente pausada: entra a
+  console.tidbcloud.com, resume el cluster, y luego redespliega en Render.
+- guardianstop.com muestra una copia vieja desde el Worker de Cloudflare
+  ("guardianstop-web"). Hay que abrirlo en Cloudflare y revisarlo conmigo.

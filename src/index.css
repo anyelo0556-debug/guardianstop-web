@@ -4,27 +4,27 @@
 
 @layer base {
   :root {
-    --background: 220 45% 10%;
-    --foreground: 60 40% 92%;
-    --card: 220 40% 13%;
-    --card-foreground: 60 40% 92%;
-    --popover: 220 40% 13%;
-    --popover-foreground: 60 40% 92%;
-    --primary: 43 55% 54%;
-    --primary-foreground: 220 45% 10%;
-    --secondary: 220 35% 18%;
-    --secondary-foreground: 60 40% 92%;
-    --muted: 220 35% 18%;
-    --muted-foreground: 220 15% 55%;
-    --accent: 220 35% 18%;
-    --accent-foreground: 60 40% 92%;
-    --destructive: 0 84% 60%;
+    --background: 0 0% 100%;
+    --foreground: 220 45% 11%;
+    --card: 210 45% 97%;
+    --card-foreground: 220 45% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 45% 11%;
+    --primary: 214 80% 47%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 45% 94%;
+    --secondary-foreground: 220 45% 11%;
+    --muted: 210 45% 94%;
+    --muted-foreground: 216 15% 42%;
+    --accent: 210 45% 94%;
+    --accent-foreground: 220 45% 11%;
+    --destructive: 0 84% 50%;
     --destructive-foreground: 0 0% 100%;
-    --border: 220 30% 22%;
-    --input: 220 30% 22%;
-    --ring: 43 55% 54%;
+    --border: 214 35% 88%;
+    --input: 214 35% 88%;
+    --ring: 214 80% 47%;
     --radius: 0.5rem;
-    --chart-1: 43 55% 54%;
+    --chart-1: 214 80% 47%;
     --chart-2: 160 84% 39%;
     --chart-3: 38 92% 50%;
     --chart-4: 0 84% 60%;
@@ -47,7 +47,7 @@
 
 @layer utilities {
   .text-glow {
-    text-shadow: 0 0 20px rgba(201,168,76,0.35);
+    text-shadow: 0 0 20px rgba(29,111,224,0.35);
   }
   .text-glow-green {
     text-shadow: 0 0 20px rgba(22,163,74,0.35);
@@ -56,18 +56,31 @@
     text-shadow: 0 0 20px rgba(220,38,38,0.35);
   }
   .border-glow {
-    box-shadow: 0 0 0 1px rgba(201,168,76,0.2), 0 0 20px rgba(201,168,76,0.1);
+    box-shadow: 0 0 0 1px rgba(29,111,224,0.2), 0 0 20px rgba(29,111,224,0.1);
   }
   .terminal-grid {
     background-image: 
-      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      linear-gradient(rgba(10,22,40,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(10,22,40,0.04) 1px, transparent 1px);
     background-size: 40px 40px;
   }
   .glass-panel {
     @apply bg-card/80 backdrop-blur-md border border-border/60;
   }
 }
+
+/* Migración a tema claro: el texto que era blanco (pensado para fondo oscuro)
+   pasa a azul-negro. Si el mismo elemento tiene fondo de color, mantiene blanco. */
+.text-white { color: #0A1628 !important; }
+.text-white[class*="bg-"] { color: #ffffff !important; }
+.bg-gs-red .text-white,
+.bg-gs-green .text-white,
+.bg-gs-gold .text-white,
+.bg-gs-teal .text-white,
+.bg-gs-orange .text-white,
+.bg-gs-purple .text-white,
+.bg-gs-cyan .text-white,
+.bg-primary .text-white { color: #ffffff !important; }
 
 @keyframes pulse-glow {
   0%, 100% { opacity: 0.4; transform: scale(1); }
@@ -80,9 +93,9 @@
 }
 
 @keyframes shield-shimmer {
-  0% { filter: drop-shadow(0 0 40px rgba(201,168,76,0.2)) drop-shadow(0 0 80px rgba(201,168,76,0.08)); }
-  50% { filter: drop-shadow(0 0 50px rgba(201,168,76,0.35)) drop-shadow(0 0 100px rgba(201,168,76,0.15)); }
-  100% { filter: drop-shadow(0 0 40px rgba(201,168,76,0.2)) drop-shadow(0 0 80px rgba(201,168,76,0.08)); }
+  0% { filter: drop-shadow(0 0 40px rgba(29,111,224,0.2)) drop-shadow(0 0 80px rgba(29,111,224,0.08)); }
+  50% { filter: drop-shadow(0 0 50px rgba(29,111,224,0.35)) drop-shadow(0 0 100px rgba(29,111,224,0.15)); }
+  100% { filter: drop-shadow(0 0 40px rgba(29,111,224,0.2)) drop-shadow(0 0 80px rgba(29,111,224,0.08)); }
 }
 
 @keyframes bounce-slow {
