@@ -146,6 +146,13 @@ class AccountMonitor:
         if len(self.positions) == 0:
             return None
 
+        active_lock = db_client.active_risk_lockout(self.account_id)
+        if active_lock:
+            if self.broker_name.lower() in ("ig", "deriv"):
+                closed_count, failed_count = self.client.close_all(self.positions)
+                print(f"[ACCOUNT {self.account_id}] Lock active ({active_lock}); closed {closed_count}, failed {failed_count}")
+            return active_lock
+
         trigger = check_protection(
             initial_balance=self.initial_balance,
             current_balance=self.current_balance,
@@ -163,6 +170,8 @@ class AccountMonitor:
         )
 
         if trigger and self.client:
+            if trigger in ("daily_limit", "weekly_limit", "monthly_limit"):
+                trigger = db_client.record_risk_breach(self.account_id, trigger)
             print(f"[ACCOUNT {self.account_id}] PROTECTION TRIGGERED: {trigger}")
 
             # Calculate stats before closing
@@ -254,6 +263,7 @@ def main_loop():
     # Ensure tables exist
     db_client.ensure_credentials_table()
     db_client.ensure_state_table()
+    db_client.ensure_risk_lockouts_table()
 
     monitors: List[AccountMonitor] = []
     last_account_refresh = 0

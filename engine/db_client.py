@@ -4,7 +4,7 @@ Reads account configs and writes trade/protection logs.
 """
 import os
 import pymysql
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from contextlib import contextmanager
 
@@ -232,6 +232,101 @@ def insert_notification(
                 VALUES (%s, %s, %s, %s)
             """, (user_id, notif_type, title, message))
             return cur.lastrowid
+
+
+def ensure_risk_lockouts_table():
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS risk_lockouts (
+                    accountId BIGINT UNSIGNED PRIMARY KEY,
+                    dailyLockedUntil DATETIME NULL,
+                    weeklyLockedUntil DATETIME NULL,
+                    monthlyLockedUntil DATETIME NULL,
+                    monthKey VARCHAR(7) NULL,
+                    weeklyBreachWeeks TEXT NULL,
+                    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """)
+
+def get_risk_lockout(account_id: int):
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
+            return cur.fetchone()
+
+def active_risk_lockout(account_id: int, now: Optional[datetime] = None) -> Optional[str]:
+    now = now or datetime.utcnow()
+    state = get_risk_lockout(account_id)
+    if not state:
+        return None
+    for field, label in (
+        ("monthlyLockedUntil", "monthly_limit"),
+        ("weeklyLockedUntil", "weekly_limit"),
+        ("dailyLockedUntil", "daily_limit"),
+    ):
+        until = state.get(field)
+        if until and now < until:
+            return label
+    return None
+
+def _end_of_trading_week(now: datetime) -> datetime:
+    days = (6 - now.weekday()) % 7
+    target = (now + timedelta(days=days)).replace(hour=22, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=7)
+    return target
+
+def _end_of_trading_month(now: datetime) -> datetime:
+    year, month = now.year, now.month + 1
+    if month == 13:
+        year, month = year + 1, 1
+    return datetime(year, month, 1, 22, 0, 0)
+
+def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = None) -> str:
+    from engine.risk import get_trading_month_key, get_trading_week_key
+    now = now or datetime.utcnow()
+    ensure_risk_lockouts_table()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
+            state = cur.fetchone() or {}
+            daily_until = state.get("dailyLockedUntil")
+            weekly_until = state.get("weeklyLockedUntil")
+            monthly_until = state.get("monthlyLockedUntil")
+            month_key = get_trading_month_key(now)
+            stored_month = state.get("monthKey")
+            weeks = [] if stored_month != month_key else [
+                item for item in (state.get("weeklyBreachWeeks") or "").split(",") if item
+            ]
+
+            result = trigger
+            if trigger == "daily_limit":
+                daily_until = now + timedelta(hours=12)
+            elif trigger == "weekly_limit":
+                week_key = get_trading_week_key(now)
+                if week_key not in weeks:
+                    weeks.append(week_key)
+                if len(weeks) >= 2:
+                    monthly_until = _end_of_trading_month(now)
+                    result = "monthly_limit"
+                else:
+                    weekly_until = _end_of_trading_week(now)
+            elif trigger == "monthly_limit":
+                monthly_until = _end_of_trading_month(now)
+
+            cur.execute("""
+                INSERT INTO risk_lockouts
+                    (accountId, dailyLockedUntil, weeklyLockedUntil, monthlyLockedUntil, monthKey, weeklyBreachWeeks)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    dailyLockedUntil=VALUES(dailyLockedUntil),
+                    weeklyLockedUntil=VALUES(weeklyLockedUntil),
+                    monthlyLockedUntil=VALUES(monthlyLockedUntil),
+                    monthKey=VALUES(monthKey),
+                    weeklyBreachWeeks=VALUES(weeklyBreachWeeks)
+            """, (account_id, daily_until, weekly_until, monthly_until, month_key, ",".join(weeks)))
+    return result
 
 # ── RUNTIME STATE (in-memory table for engine heartbeat) ────────
 
