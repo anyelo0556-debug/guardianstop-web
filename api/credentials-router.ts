@@ -54,7 +54,7 @@ export const credentialsRouter = createRouter({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Broker does not match the trading account" });
       }
 
-      const values: Record<string, string> = {};
+      const values: { igApiKey?: string; igIdentifier?: string; igPassword?: string; derivApiToken?: string } = {};
       if (input.igApiKey !== undefined) values.igApiKey = encryptSecret(input.igApiKey);
       if (input.igIdentifier !== undefined) values.igIdentifier = input.igIdentifier;
       if (input.igPassword !== undefined) values.igPassword = encryptSecret(input.igPassword);
