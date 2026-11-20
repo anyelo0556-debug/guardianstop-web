@@ -48,8 +48,10 @@ class AccountMonitor:
         self.account_type = account["accountType"]
         self.initial_balance = float(account["initialCapital"]) if account["initialCapital"] else 0
         self.daily_limit_pct = float(account["dailyLimitPct"]) if account["dailyLimitPct"] else 1.0
-        self.weekly_limit_pct = float(account["weeklyLimitPct"]) if account["weeklyLimitPct"] else 10.0
-        self.monthly_limit_pct = float(account["monthlyLimitPct"]) if account["monthlyLimitPct"] else 30.0
+        if self.daily_limit_pct not in (1.0, 2.0, 3.0):
+            self.daily_limit_pct = 1.0
+        self.weekly_limit_pct = 10.0
+        self.monthly_limit_pct = 20.0
         self.trailing_enabled = bool(account["trailingEnabled"])
         self.trailing_activation_pct = float(account["trailingActivationPct"]) if account["trailingActivationPct"] else 1.0
         self.trailing_protection_pct = float(account["trailingProtectionPct"]) if account["trailingProtectionPct"] else 30.0
@@ -67,7 +69,7 @@ class AccountMonitor:
         self.total_pnl: float = 0.0
         self.peak_pnl: float = 0.0
         self.positions: List[Dict] = []
-        self.closed_trades_cache: List[Dict] = []
+        self.closed_trades_cache: List[Dict] = db_client.get_closed_trades(self.account_id)
         self.last_check = 0
         self.trailing_fired = False
 
@@ -124,7 +126,7 @@ class AccountMonitor:
                 if bal is not None:
                     self.current_balance = bal
                 self.positions = self.client.get_positions()
-                self.total_pnl = sum(p.get("profit", 0) for p in self.positions)
+                self.total_pnl = sum(float(p.get("profit", 0) or 0) for p in self.positions)
 
             # Track peak P&L for trailing stop
             if self.total_pnl > self.peak_pnl:
@@ -144,6 +146,13 @@ class AccountMonitor:
         if len(self.positions) == 0:
             return None
 
+        active_lock = db_client.active_risk_lockout(self.account_id)
+        if active_lock:
+            if self.broker_name.lower() in ("ig", "deriv"):
+                closed_count, failed_count = self.client.close_all(self.positions)
+                print(f"[ACCOUNT {self.account_id}] Lock active ({active_lock}); closed {closed_count}, failed {failed_count}")
+            return active_lock
+
         trigger = check_protection(
             initial_balance=self.initial_balance,
             current_balance=self.current_balance,
@@ -157,9 +166,12 @@ class AccountMonitor:
             trailing_activation_pct=self.trailing_activation_pct,
             trailing_protection_pct=self.trailing_protection_pct,
             closed_trades=self.closed_trades_cache,
+            floating_pnl=sum(float(p.get("profit", 0) or 0) for p in self.positions),
         )
 
         if trigger and self.client:
+            if trigger in ("daily_limit", "weekly_limit", "monthly_limit"):
+                trigger = db_client.record_risk_breach(self.account_id, trigger)
             print(f"[ACCOUNT {self.account_id}] PROTECTION TRIGGERED: {trigger}")
 
             # Calculate stats before closing
@@ -172,6 +184,7 @@ class AccountMonitor:
                 self.weekly_limit_pct,
                 self.monthly_limit_pct,
                 self.closed_trades_cache,
+                floating_pnl=sum(float(p.get("profit", 0) or 0) for p in self.positions),
             )
 
             # Close all positions
@@ -250,6 +263,7 @@ def main_loop():
     # Ensure tables exist
     db_client.ensure_credentials_table()
     db_client.ensure_state_table()
+    db_client.ensure_risk_lockouts_table()
 
     monitors: List[AccountMonitor] = []
     last_account_refresh = 0
@@ -309,6 +323,7 @@ def main_loop():
                     monitor.weekly_limit_pct,
                     monitor.monthly_limit_pct,
                     monitor.closed_trades_cache,
+                    floating_pnl=sum(float(p.get("profit", 0) or 0) for p in monitor.positions),
                 )
 
                 print(

@@ -165,15 +165,28 @@ class DerivClient:
             return False, str(e)
 
     def close_all(self, positions: List[Dict]) -> Tuple[int, int]:
+        """Close positions and confirm disappearance from the broker portfolio."""
         closed = 0
         failed = 0
         for pos in positions:
             cid = pos.get("id")
-            if cid:
+            if not cid:
+                failed += 1
+                continue
+            confirmed = False
+            for attempt in range(3):
                 ok, _ = self.close_position(cid)
-                if ok:
-                    closed += 1
-                else:
-                    failed += 1
-                time.sleep(0.5)
+                if not ok:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                # A successful sell response is only an acknowledgement, not proof of closure.
+                remaining = self.get_positions()
+                if not any(item.get("id") == cid for item in remaining):
+                    confirmed = True
+                    break
+                time.sleep(0.5 * (attempt + 1))
+            if confirmed:
+                closed += 1
+            else:
+                failed += 1
         return closed, failed
