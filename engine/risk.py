@@ -168,6 +168,8 @@ def check_protection(
     if positions_count == 0:
         return None
 
+    if positions_count <= 0:
+        return None
     limits = calculate_limits(
         initial_balance, daily_limit_pct, weekly_limit_pct, monthly_limit_pct, closed_trades
     )

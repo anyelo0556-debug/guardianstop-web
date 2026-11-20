@@ -144,6 +144,9 @@ class AccountMonitor:
         if len(self.positions) == 0:
             return None
 
+        if not self.positions:
+            return None
+
         trigger = check_protection(
             initial_balance=self.initial_balance,
             current_balance=self.current_balance,
