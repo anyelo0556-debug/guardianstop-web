@@ -1,141 +1,132 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { and, desc, eq } from "drizzle-orm";
 import { createRouter, authedQuery } from "./middleware";
 import DerivAPI, { type ProtectionState, type ProtectionLog } from "./services/DerivAPI";
+import { getDb } from "./queries/connection";
+import { accounts } from "@db/schema";
 
-// Demo config - Ángel's account
+// Existing demo connection is intentionally preserved for the current pilot.
 const DEMO_CONFIG = {
   appId: "019e0769-496a-7c63-9b8d-cbe709b744e4",
   apiToken: "pat_85e81e5b3e0efc239ef10b2df8b1db9b4d31ab4d86a28ba682e22abd2c733845",
   accountId: "VRTC41298507",
 };
 
-// Store active connections (in production, use Redis)
 const activeConnections: Map<number, DerivAPI> = new Map();
 
 function getOrCreateConnection(userId: number): DerivAPI {
   if (!activeConnections.has(userId)) {
-    const api = new DerivAPI(DEMO_CONFIG);
-    activeConnections.set(userId, api);
+    activeConnections.set(userId, new DerivAPI(DEMO_CONFIG));
   }
   return activeConnections.get(userId)!;
 }
 
+async function findUserDerivDemoAccount(userId: number) {
+  const db = getDb();
+  const rows = await db.select().from(accounts)
+    .where(and(eq(accounts.userId, userId), eq(accounts.brokerName, "deriv"), eq(accounts.accountType, "demo")))
+    .orderBy(desc(accounts.createdAt)).limit(1);
+  return rows[0];
+}
+
 export const derivRouter = createRouter({
-  // Connect to Deriv
-  connect: authedQuery
-    .mutation(async ({ ctx }) => {
-      const api = getOrCreateConnection(ctx.user.id);
-      const connected = await api.connect();
-      return { connected };
-    }),
+  connect: authedQuery.mutation(async ({ ctx }) => {
+    const api = getOrCreateConnection(ctx.user.id);
+    return { connected: await api.connect() };
+  }),
 
-  // Get account info
-  getAccountInfo: authedQuery
-    .query(async ({ ctx }) => {
-      const api = getOrCreateConnection(ctx.user.id);
-      if (!api.isConnected()) {
-        await api.connect();
-      }
-      const info = await api.getAccountInfo();
-      return {
-        balance: info.balance,
-        currency: info.currency,
-        loginid: info.loginid,
-        isVirtual: info.is_virtual,
-      };
-    }),
+  getAccountInfo: authedQuery.query(async ({ ctx }) => {
+    const api = getOrCreateConnection(ctx.user.id);
+    if (!api.isConnected()) await api.connect();
+    const info = await api.getAccountInfo();
+    return {
+      balance: info.balance,
+      currency: info.currency,
+      loginid: info.loginid,
+      isVirtual: info.is_virtual,
+    };
+  }),
 
-  // Get current portfolio (open positions)
-  getPortfolio: authedQuery
-    .query(async ({ ctx }) => {
-      const api = getOrCreateConnection(ctx.user.id);
-      if (!api.isConnected()) {
-        await api.connect();
-      }
-      const positions = await api.getPortfolio();
-      return positions;
-    }),
+  getPortfolio: authedQuery.query(async ({ ctx }) => {
+    const api = getOrCreateConnection(ctx.user.id);
+    if (!api.isConnected()) await api.connect();
+    return api.getPortfolio();
+  }),
 
-  // Close all positions (emergency)
-  closeAllPositions: authedQuery
-    .mutation(async ({ ctx }) => {
-      const api = getOrCreateConnection(ctx.user.id);
-      if (!api.isConnected()) {
-        await api.connect();
-      }
-      const closed = await api.closeAllPositions();
-      return { closed };
-    }),
+  closeAllPositions: authedQuery.mutation(async ({ ctx }) => {
+    const api = getOrCreateConnection(ctx.user.id);
+    if (!api.isConnected()) await api.connect();
+    const closed = await api.closeAllPositions();
+    return { closed };
+  }),
 
-  // Subscribe to balance updates (polling-based for now)
-  getBalance: authedQuery
-    .query(async ({ ctx }) => {
-      const api = getOrCreateConnection(ctx.user.id);
-      if (!api.isConnected()) {
-        await api.connect();
-      }
-      const info = await api.getAccountInfo();
-      return { balance: info.balance, currency: info.currency };
-    }),
+  getBalance: authedQuery.query(async ({ ctx }) => {
+    const api = getOrCreateConnection(ctx.user.id);
+    if (!api.isConnected()) await api.connect();
+    const info = await api.getAccountInfo();
+    return { balance: info.balance, currency: info.currency };
+  }),
 
-  // Get protection state (stored in DB or memory)
-  getProtectionState: authedQuery
-    .query(async () => {
-      // Default protection state
-      const state: ProtectionState = {
-        dailyLimitPct: 1,
-        weeklyLimitPct: 10,
-        monthlyLimitPct: 30,
-        trailingEnabled: true,
-        trailingActivationPct: 1,
-        trailingProtectionPct: 30,
-        isActive: true,
-      };
-      return state;
-    }),
+  getProtectionState: authedQuery.query(async ({ ctx }) => {
+    const account = await findUserDerivDemoAccount(ctx.user.id);
+    const state: ProtectionState = {
+      dailyLimitPct: Number(account?.dailyLimitPct ?? 1),
+      weeklyLimitPct: 10,
+      monthlyLimitPct: 20,
+      trailingEnabled: account?.trailingEnabled ?? true,
+      trailingActivationPct: Number(account?.trailingActivationPct ?? 1),
+      trailingProtectionPct: Number(account?.trailingProtectionPct ?? 30),
+      isActive: account?.isActive ?? true,
+    };
+    return state;
+  }),
 
-  // Update protection settings
   updateProtection: authedQuery
-    .input(
-      z.object({
-        dailyLimitPct: z.number().min(0.1).max(100),
-        weeklyLimitPct: z.number().min(0.1).max(100),
-        monthlyLimitPct: z.number().min(0.1).max(100),
-        trailingEnabled: z.boolean(),
-        isActive: z.boolean(),
-      })
-    )
-    .mutation(async ({ input }) => {
-      // In production, save to DB
+    .input(z.object({
+      dailyLimitPct: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+      weeklyLimitPct: z.literal(10),
+      monthlyLimitPct: z.literal(20),
+      trailingEnabled: z.boolean(),
+      isActive: z.boolean(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const account = await findUserDerivDemoAccount(ctx.user.id);
+      if (!account) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "No se encontró una cuenta demo de Deriv vinculada a este usuario",
+        });
+      }
+      const db = getDb();
+      await db.update(accounts).set({
+        dailyLimitPct: input.dailyLimitPct.toFixed(2),
+        weeklyLimitPct: "10.00",
+        monthlyLimitPct: "20.00",
+        trailingEnabled: input.trailingEnabled,
+        isActive: input.isActive,
+      }).where(and(eq(accounts.id, account.id), eq(accounts.userId, ctx.user.id)));
       return { success: true, settings: input };
     }),
 
-  // Get protection logs
-  getProtectionLogs: authedQuery
-    .query(async () => {
-      // Return mock logs for demo
-      const logs: ProtectionLog[] = [
-        {
-          timestamp: new Date(),
-          action: "RESET",
-          message: "Sistema de protección iniciado",
-          balanceBefore: 10000,
-          balanceAfter: 10000,
-          details: "Prueba piloto con Deriv Demo VRTC41298507",
-        },
-      ];
-      return logs;
-    }),
+  getProtectionLogs: authedQuery.query(async () => {
+    const logs: ProtectionLog[] = [{
+      timestamp: new Date(),
+      action: "RESET",
+      message: "Sistema de protección iniciado",
+      balanceBefore: 10000,
+      balanceAfter: 10000,
+      details: "Prueba piloto con Deriv Demo VRTC41298507",
+    }];
+    return logs;
+  }),
 
-  // Disconnect
-  disconnect: authedQuery
-    .mutation(async ({ ctx }) => {
-      const api = activeConnections.get(ctx.user.id);
-      if (api) {
-        api.disconnect();
-        activeConnections.delete(ctx.user.id);
-      }
-      return { disconnected: true };
-    }),
+  disconnect: authedQuery.mutation(async ({ ctx }) => {
+    const api = activeConnections.get(ctx.user.id);
+    if (api) {
+      api.disconnect();
+      activeConnections.delete(ctx.user.id);
+    }
+    return { disconnected: true };
+  }),
 });
