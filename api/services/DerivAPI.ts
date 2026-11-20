@@ -191,12 +191,19 @@ class DerivAPI {
     const positions = await this.getPortfolio();
     let closed = 0;
     for (const pos of positions) {
-      try {
-        await this.closePosition(pos.contract_id);
-        closed++;
-      } catch (e) {
-        console.error(`Failed to close position ${pos.contract_id}:`, e);
+      let confirmed = false;
+      for (let attempt = 0; attempt < 3 && !confirmed; attempt++) {
+        try {
+          await this.closePosition(pos.contract_id);
+          await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
+          const remaining = await this.getPortfolio();
+          confirmed = !remaining.some((item) => item.contract_id === pos.contract_id);
+        } catch (error) {
+          console.error(`Close attempt ${attempt + 1} failed for contract ${pos.contract_id}:`, error);
+        }
       }
+      if (confirmed) closed++;
+      else console.error(`Could not confirm closure of Deriv contract ${pos.contract_id}`);
     }
     return closed;
   }
