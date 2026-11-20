@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { createRouter, authedQuery } from "./middleware";
 import DerivAPI, { type ProtectionState, type ProtectionLog } from "./services/DerivAPI";
 
