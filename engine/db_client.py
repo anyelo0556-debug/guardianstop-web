@@ -57,35 +57,45 @@ def _conn():
 
 # ── ACCOUNT CONFIG ──────────────────────────────────────────────
 
+def _decrypt_secret(value):
+    """Decrypt AES-256-GCM values from the Node API; allow legacy plaintext during migration."""
+    if not value or not value.startswith("enc:v1:"):
+        return value or ""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key_hex = os.environ.get("CREDENTIALS_ENCRYPTION_KEY", "")
+    if len(key_hex) != 64:
+        raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY must be a 32-byte hex key")
+    try:
+        _, version, iv_hex, tag_hex, ciphertext_hex = value.split(":", 4)
+        if version != "v1":
+            raise ValueError("Unsupported credential encryption version")
+        aes = AESGCM(bytes.fromhex(key_hex))
+        encrypted = bytes.fromhex(ciphertext_hex) + bytes.fromhex(tag_hex)
+        return aes.decrypt(bytes.fromhex(iv_hex), encrypted, None).decode("utf-8")
+    except Exception as exc:
+        raise RuntimeError("Unable to decrypt broker credential; verify the shared encryption key") from exc
+
 def get_active_accounts() -> List[Dict]:
-    """Fetch all active trading accounts with broker credentials.
-    Reads from account_credentials; if no linked account, uses defaults."""
+    """Load only active, fully linked trading accounts and decrypt secrets in memory."""
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    ac.accountId,
-                    COALESCE(a.userId, 1) AS userId,
-                    COALESCE(a.brokerName, 'ig') AS brokerName,
-                    COALESCE(a.accountNumber, '') AS accountNumber,
-                    COALESCE(a.accountType, 'demo') AS accountType,
-                    COALESCE(a.initialCapital, 10000) AS initialCapital,
-                    COALESCE(a.currentBalance, 10000) AS currentBalance,
-                    COALESCE(a.dailyLimitPct, 1.0) AS dailyLimitPct,
-                    COALESCE(a.weeklyLimitPct, 10.0) AS weeklyLimitPct,
-                    COALESCE(a.monthlyLimitPct, 30.0) AS monthlyLimitPct,
-                    COALESCE(a.trailingEnabled, 0) AS trailingEnabled,
-                    COALESCE(a.trailingActivationPct, 1.0) AS trailingActivationPct,
-                    COALESCE(a.trailingProtectionPct, 30.0) AS trailingProtectionPct,
-                    COALESCE(a.isActive, 1) AS isActive,
-                    ac.igApiKey,
-                    ac.igIdentifier,
-                    ac.igPassword,
-                    ac.derivApiToken
-                FROM account_credentials ac
-                LEFT JOIN accounts a ON a.id = ac.accountId
+                    a.id AS accountId, a.userId, a.brokerName, a.accountNumber,
+                    a.accountType, a.initialCapital, a.currentBalance,
+                    a.dailyLimitPct, 10.0 AS weeklyLimitPct,
+                    20.0 AS monthlyLimitPct,
+                    a.trailingEnabled, a.trailingActivationPct, a.trailingProtectionPct,
+                    a.isActive, ac.igApiKey, ac.igIdentifier, ac.igPassword, ac.derivApiToken
+                FROM accounts a
+                INNER JOIN account_credentials ac ON ac.accountId = a.id
+                WHERE a.isActive = 1
             """)
-            return cur.fetchall()
+            rows = cur.fetchall()
+    for row in rows:
+        for field in ("igApiKey", "igPassword", "derivApiToken"):
+            row[field] = _decrypt_secret(row.get(field))
+    return rows
 
 # ── CREDENTIALS TABLE (must exist) ──────────────────────────────
 
