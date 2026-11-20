@@ -62,10 +62,10 @@ export const accountCredentials = mysqlTable("account_credentials", {
   accountId: bigint("accountId", { mode: "number", unsigned: true })
     .notNull()
     .references(() => accounts.id, { onDelete: "cascade" }),
-  igApiKey: varchar("igApiKey", { length: 512 }),
+  igApiKey: text("igApiKey"),
   igIdentifier: varchar("igIdentifier", { length: 100 }),
   igPassword: text("igPassword"),
-  derivApiToken: varchar("derivApiToken", { length: 512 }),
+  derivApiToken: text("derivApiToken"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
 });

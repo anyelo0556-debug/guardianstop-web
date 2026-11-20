@@ -97,10 +97,10 @@ def ensure_credentials_table():
                 CREATE TABLE IF NOT EXISTS account_credentials (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     accountId BIGINT UNSIGNED NOT NULL,
-                    igApiKey VARCHAR(255),
+                    igApiKey TEXT,
                     igIdentifier VARCHAR(100),
                     igPassword TEXT,
-                    derivApiToken VARCHAR(255),
+                    derivApiToken TEXT,
                     createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     UNIQUE KEY (accountId)
