@@ -43,7 +43,7 @@ export const accounts = mysqlTable("accounts", {
   currentBalance: decimal("currentBalance", { precision: 15, scale: 2 }).notNull(),
   dailyLimitPct: decimal("dailyLimitPct", { precision: 5, scale: 2 }).default("1.00").notNull(),
   weeklyLimitPct: decimal("weeklyLimitPct", { precision: 5, scale: 2 }).default("10.00").notNull(),
-  monthlyLimitPct: decimal("monthlyLimitPct", { precision: 5, scale: 2 }).default("30.00").notNull(),
+  monthlyLimitPct: decimal("monthlyLimitPct", { precision: 5, scale: 2 }).default("20.00").notNull(),
   trailingEnabled: boolean("trailingEnabled").default(false).notNull(),
   trailingActivationPct: decimal("trailingActivationPct", { precision: 5, scale: 2 }).default("1.00").notNull(),
   trailingProtectionPct: decimal("trailingProtectionPct", { precision: 5, scale: 2 }).default("30.00").notNull(),
@@ -62,10 +62,10 @@ export const accountCredentials = mysqlTable("account_credentials", {
   accountId: bigint("accountId", { mode: "number", unsigned: true })
     .notNull()
     .references(() => accounts.id, { onDelete: "cascade" }),
-  igApiKey: varchar("igApiKey", { length: 255 }),
+  igApiKey: varchar("igApiKey", { length: 512 }),
   igIdentifier: varchar("igIdentifier", { length: 100 }),
   igPassword: text("igPassword"),
-  derivApiToken: varchar("derivApiToken", { length: 255 }),
+  derivApiToken: varchar("derivApiToken", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
 });
