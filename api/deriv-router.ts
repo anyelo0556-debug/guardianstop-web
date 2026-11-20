@@ -6,7 +6,6 @@ import DerivAPI, { type ProtectionState, type ProtectionLog } from "./services/D
 import { getDb } from "./queries/connection";
 import { accounts } from "@db/schema";
 
-// Existing demo connection is intentionally preserved for the current pilot.
 const DEMO_CONFIG = {
   appId: "019e0769-496a-7c63-9b8d-cbe709b744e4",
   apiToken: "pat_85e81e5b3e0efc239ef10b2df8b1db9b4d31ab4d86a28ba682e22abd2c733845",
@@ -16,18 +15,16 @@ const DEMO_CONFIG = {
 const activeConnections: Map<number, DerivAPI> = new Map();
 
 function getOrCreateConnection(userId: number): DerivAPI {
-  if (!activeConnections.has(userId)) {
-    activeConnections.set(userId, new DerivAPI(DEMO_CONFIG));
-  }
+  if (!activeConnections.has(userId)) activeConnections.set(userId, new DerivAPI(DEMO_CONFIG));
   return activeConnections.get(userId)!;
 }
 
 async function findUserDerivDemoAccount(userId: number) {
   const db = getDb();
   const rows = await db.select().from(accounts)
-    .where(and(eq(accounts.userId, userId), eq(accounts.brokerName, "deriv"), eq(accounts.accountType, "demo")))
-    .orderBy(desc(accounts.createdAt)).limit(1);
-  return rows[0];
+    .where(and(eq(accounts.userId, userId), eq(accounts.accountType, "demo")))
+    .orderBy(desc(accounts.createdAt));
+  return rows.find((account) => account.brokerName.toLowerCase() === "deriv");
 }
 
 export const derivRouter = createRouter({
@@ -40,12 +37,7 @@ export const derivRouter = createRouter({
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
     const info = await api.getAccountInfo();
-    return {
-      balance: info.balance,
-      currency: info.currency,
-      loginid: info.loginid,
-      isVirtual: info.is_virtual,
-    };
+    return { balance: info.balance, currency: info.currency, loginid: info.loginid, isVirtual: info.is_virtual };
   }),
 
   getPortfolio: authedQuery.query(async ({ ctx }) => {
@@ -57,8 +49,7 @@ export const derivRouter = createRouter({
   closeAllPositions: authedQuery.mutation(async ({ ctx }) => {
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
-    const closed = await api.closeAllPositions();
-    return { closed };
+    return { closed: await api.closeAllPositions() };
   }),
 
   getBalance: authedQuery.query(async ({ ctx }) => {
@@ -93,10 +84,7 @@ export const derivRouter = createRouter({
     .mutation(async ({ input, ctx }) => {
       const account = await findUserDerivDemoAccount(ctx.user.id);
       if (!account) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "No se encontró una cuenta demo de Deriv vinculada a este usuario",
-        });
+        throw new TRPCError({ code: "NOT_FOUND", message: "No se encontró una cuenta demo de Deriv vinculada a este usuario" });
       }
       const db = getDb();
       await db.update(accounts).set({
@@ -111,11 +99,9 @@ export const derivRouter = createRouter({
 
   getProtectionLogs: authedQuery.query(async () => {
     const logs: ProtectionLog[] = [{
-      timestamp: new Date(),
-      action: "RESET",
+      timestamp: new Date(), action: "RESET",
       message: "Sistema de protección iniciado",
-      balanceBefore: 10000,
-      balanceAfter: 10000,
+      balanceBefore: 10000, balanceAfter: 10000,
       details: "Prueba piloto con Deriv Demo VRTC41298507",
     }];
     return logs;
