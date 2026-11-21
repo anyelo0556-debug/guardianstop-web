@@ -251,6 +251,7 @@ def ensure_risk_lockouts_table():
                 CREATE TABLE IF NOT EXISTS risk_lockouts (
                     accountId BIGINT UNSIGNED PRIMARY KEY,
                     dailyLockedUntil DATETIME NULL,
+                    dailyBreachKey VARCHAR(10) NULL,
                     weeklyLockedUntil DATETIME NULL,
                     monthlyLockedUntil DATETIME NULL,
                     monthKey VARCHAR(7) NULL,
@@ -294,7 +295,7 @@ def _end_of_trading_month(now: datetime) -> datetime:
     return datetime(year, month, 1, 22, 0, 0)
 
 def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = None) -> str:
-    from engine.risk import get_trading_month_key, get_trading_week_key
+    from engine.risk import get_trading_day_key, get_trading_month_key, get_trading_week_key
     now = now or datetime.utcnow()
     ensure_risk_lockouts_table()
     with _conn() as conn:
@@ -302,6 +303,7 @@ def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = 
             cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
             state = cur.fetchone() or {}
             daily_until = state.get("dailyLockedUntil")
+            daily_breach_key = state.get("dailyBreachKey")
             weekly_until = state.get("weeklyLockedUntil")
             monthly_until = state.get("monthlyLockedUntil")
             month_key = get_trading_month_key(now)
@@ -312,6 +314,11 @@ def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = 
 
             result = trigger
             if trigger == "daily_limit":
+                # Permit one 12-hour cooldown per trading day, then allow resume.
+                current_day = get_trading_day_key(now)
+                if daily_breach_key == current_day:
+                    return "daily_limit"
+                daily_breach_key = current_day
                 daily_until = now + timedelta(hours=12)
             elif trigger == "weekly_limit":
                 week_key = get_trading_week_key(now)
@@ -327,15 +334,16 @@ def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = 
 
             cur.execute("""
                 INSERT INTO risk_lockouts
-                    (accountId, dailyLockedUntil, weeklyLockedUntil, monthlyLockedUntil, monthKey, weeklyBreachWeeks)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (accountId, dailyLockedUntil, dailyBreachKey, weeklyLockedUntil, monthlyLockedUntil, monthKey, weeklyBreachWeeks)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     dailyLockedUntil=VALUES(dailyLockedUntil),
+                    dailyBreachKey=VALUES(dailyBreachKey),
                     weeklyLockedUntil=VALUES(weeklyLockedUntil),
                     monthlyLockedUntil=VALUES(monthlyLockedUntil),
                     monthKey=VALUES(monthKey),
                     weeklyBreachWeeks=VALUES(weeklyBreachWeeks)
-            """, (account_id, daily_until, weekly_until, monthly_until, month_key, ",".join(weeks)))
+            """, (account_id, daily_until, daily_breach_key, weekly_until, monthly_until, month_key, ",".join(weeks)))
     return result
 
 # ── RUNTIME STATE (in-memory table for engine heartbeat) ────────
