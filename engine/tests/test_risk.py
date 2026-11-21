@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from engine.risk import calculate_limits, get_trading_day_key, get_trading_week_key
+from engine.risk import calculate_limits, check_protection, get_trading_day_key, get_trading_week_key
 
 class RiskLimitTests(unittest.TestCase):
     def test_realized_and_floating_losses_consume_daily_budget(self):
@@ -35,6 +35,19 @@ class RiskLimitTests(unittest.TestCase):
         before = datetime(2026, 11, 15, 21, 59, tzinfo=timezone.utc)
         after = datetime(2026, 11, 15, 22, 0, tzinfo=timezone.utc)
         self.assertNotEqual(get_trading_week_key(before), get_trading_week_key(after))
+
+    def test_realized_daily_breach_triggers_without_open_positions(self):
+        now = datetime(2026, 11, 18, 15, 0, tzinfo=timezone.utc)
+        trigger = check_protection(
+            initial_balance=10000, current_balance=9900, total_pnl=0,
+            peak_pnl=0, positions_count=0, daily_limit_pct=1,
+            weekly_limit_pct=10, monthly_limit_pct=20,
+            trailing_enabled=False, trailing_activation_pct=1,
+            trailing_protection_pct=30,
+            closed_trades=[{"profit_loss": -100, "closed_at": now}],
+            floating_pnl=0,
+        )
+        self.assertEqual(trigger, "daily_limit")
 
     def test_day_rollover_is_2200_utc(self):
         before = datetime(2026, 11, 18, 21, 59, tzinfo=timezone.utc)
