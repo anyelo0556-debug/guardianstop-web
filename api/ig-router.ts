@@ -25,14 +25,12 @@ async function requireOwnedAccount(accountId: number, userId: number) {
     .limit(1);
 
   if (!account) {
-    // Do not reveal whether an account owned by another user exists.
     throw new TRPCError({ code: "NOT_FOUND", message: "Cuenta no encontrada" });
   }
   return account;
 }
 
 export const igRouter = createRouter({
-  // Global process controls are never exposed to ordinary customers.
   workerStatus: adminQuery.query(async () => getWorkerStatus()),
 
   startWorker: adminQuery.mutation(async () => {
@@ -50,32 +48,16 @@ export const igRouter = createRouter({
     .query(async ({ input, ctx }) => {
       const db = getDb();
       const account = await requireOwnedAccount(input.accountId, ctx.user.id);
-
-      const latestTrades = await db
-        .select()
-        .from(trades)
+      const latestTrades = await db.select().from(trades)
         .where(eq(trades.accountId, input.accountId))
-        .orderBy(desc(trades.createdAt))
-        .limit(10);
-
+        .orderBy(desc(trades.createdAt)).limit(10);
       const openTrades = latestTrades.filter((trade) => trade.status === "open");
-
-      const logs = await db
-        .select()
-        .from(protectionLogs)
+      const logs = await db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId))
-        .orderBy(desc(protectionLogs.createdAt))
-        .limit(10);
-
-      const notifs = await db
-        .select()
-        .from(notifications)
-        .where(and(
-          eq(notifications.userId, ctx.user.id),
-          eq(notifications.isRead, false),
-        ))
-        .orderBy(desc(notifications.sentAt))
-        .limit(5);
+        .orderBy(desc(protectionLogs.createdAt)).limit(10);
+      const notifs = await db.select().from(notifications)
+        .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)))
+        .orderBy(desc(notifications.sentAt)).limit(5);
 
       return {
         account: {
@@ -99,23 +81,16 @@ export const igRouter = createRouter({
     }),
 
   getProtectionHistory: authedQuery
-    .input(z.object({
-      accountId: accountIdSchema,
-      limit: boundedLimit(50, 100),
-    }))
+    .input(z.object({ accountId: accountIdSchema, limit: boundedLimit(50, 100) }))
     .query(async ({ input, ctx }) => {
       await requireOwnedAccount(input.accountId, ctx.user.id);
       const db = getDb();
-      return db
-        .select()
-        .from(protectionLogs)
+      return db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId))
-        .orderBy(desc(protectionLogs.createdAt))
-        .limit(input.limit);
+        .orderBy(desc(protectionLogs.createdAt)).limit(input.limit);
     }),
 
-  // userId is accepted for backwards-compatible clients but deliberately ignored.
-  // The authenticated session is the sole source of identity.
+  // Legacy userId is accepted but ignored; session identity is authoritative.
   getNotifications: authedQuery
     .input(z.object({
       userId: z.number().int().positive().optional(),
@@ -123,37 +98,29 @@ export const igRouter = createRouter({
     }))
     .query(async ({ input, ctx }) => {
       const db = getDb();
-      return db
-        .select()
-        .from(notifications)
+      return db.select().from(notifications)
         .where(eq(notifications.userId, ctx.user.id))
-        .orderBy(desc(notifications.sentAt))
-        .limit(input.limit);
+        .orderBy(desc(notifications.sentAt)).limit(input.limit);
     }),
 
   markNotificationRead: authedQuery
     .input(z.object({ notificationId: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
       const db = getDb();
-      const result = await db
-        .update(notifications)
-        .set({ isRead: true })
+      await db.update(notifications).set({ isRead: true })
         .where(and(
           eq(notifications.id, input.notificationId),
           eq(notifications.userId, ctx.user.id),
         ));
-
-      return { success: true, updated: result[0]?.affectedRows > 0 };
+      return { success: true };
     }),
 
-  // userId is accepted for backwards-compatible clients but deliberately ignored.
+  // Legacy userId is accepted but ignored to preserve client compatibility.
   getUserAccounts: authedQuery
     .input(z.object({ userId: z.number().int().positive().optional() }).optional())
     .query(async ({ ctx }) => {
       const db = getDb();
-      return db
-        .select()
-        .from(accounts)
+      return db.select().from(accounts)
         .where(eq(accounts.userId, ctx.user.id))
         .orderBy(desc(accounts.createdAt));
     }),
@@ -163,21 +130,13 @@ export const igRouter = createRouter({
     .query(async ({ input, ctx }) => {
       await requireOwnedAccount(input.accountId, ctx.user.id);
       const db = getDb();
-
-      const allTrades = await db
-        .select()
-        .from(trades)
+      const allTrades = await db.select().from(trades)
         .where(eq(trades.accountId, input.accountId));
-
       const openTrades = allTrades.filter((trade) => trade.status === "open");
       const closedTrades = allTrades.filter((trade) => trade.status === "closed");
       const totalPnL = closedTrades.reduce((sum, trade) => sum + Number(trade.profitLoss || 0), 0);
-
-      const logs = await db
-        .select()
-        .from(protectionLogs)
+      const logs = await db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId));
-
       const dailyTriggers = logs.filter((log) => log.triggerType === "daily_limit").length;
       const trailingTriggers = logs.filter((log) => log.triggerType === "trailing_profit").length;
 
