@@ -259,12 +259,25 @@ def ensure_risk_lockouts_table():
                     updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
             """)
+            cur.execute("""
+                SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'risk_lockouts'
+                  AND COLUMN_NAME = 'dailyBreachKey'
+            """)
+            if not cur.fetchone()["n"]:
+                cur.execute("ALTER TABLE risk_lockouts ADD COLUMN dailyBreachKey VARCHAR(10) NULL")
+
 
 def get_risk_lockout(account_id: int):
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
             return cur.fetchone()
+
+def daily_breach_recorded_today(account_id: int, now: Optional[datetime] = None) -> bool:
+    from engine.risk import get_trading_day_key
+    state = get_risk_lockout(account_id)
+    return bool(state and state.get("dailyBreachKey") == get_trading_day_key(now))
 
 def active_risk_lockout(account_id: int, now: Optional[datetime] = None) -> Optional[str]:
     now = now or datetime.utcnow()
