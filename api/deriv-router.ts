@@ -2,7 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import { createRouter, authedQuery } from "./middleware";
-import DerivAPI, { type ProtectionState, type ProtectionLog } from "./services/DerivAPI";
+import DerivAPI, { type ProtectionState } from "./services/DerivAPI";
 import { getDb } from "./queries/connection";
 import { accounts } from "@db/schema";
 
@@ -115,13 +115,8 @@ export const derivRouter = createRouter({
     }),
 
   getProtectionLogs: authedQuery.query(async () => {
-    const logs: ProtectionLog[] = [{
-      timestamp: new Date(), action: "RESET",
-      message: "Sistema de protección iniciado",
-      balanceBefore: 10000, balanceAfter: 10000,
-      details: "Prueba piloto con Deriv Demo VRTC41298507",
-    }];
-    return logs;
+    // No fabricated protection events: return only real persisted logs when wired.
+    return [];
   }),
 
   disconnect: authedQuery.mutation(async ({ ctx }) => {
