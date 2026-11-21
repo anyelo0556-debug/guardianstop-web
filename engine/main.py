@@ -128,6 +128,9 @@ class AccountMonitor:
                 self.positions = self.client.get_positions()
                 self.total_pnl = sum(float(p.get("profit", 0) or 0) for p in self.positions)
 
+            # Refresh the closed-trade ledger on every poll to include newly realized losses.
+            self.closed_trades_cache = db_client.get_closed_trades(self.account_id)
+
             # Track peak P&L for trailing stop
             if self.total_pnl > self.peak_pnl:
                 self.peak_pnl = self.total_pnl
