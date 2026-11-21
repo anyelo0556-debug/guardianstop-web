@@ -1,5 +1,3 @@
-import { env } from "../lib/env";
-
 const CTRADER_AUTHORIZE_URL = "https://id.ctrader.com/my/settings/openapi/grantingaccess/";
 const CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token";
 
