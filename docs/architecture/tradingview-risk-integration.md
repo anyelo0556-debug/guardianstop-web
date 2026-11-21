@@ -65,3 +65,78 @@ C. TradingView website connected to a third-party broker: Guardian Stop can only
 - TradingView webhook guidance: https://www.tradingview.com/support/solutions/43000722015-using-credentials-for-webhooks/
 - TradingView broker integration endpoints: https://github.com/tradingview/rest_integrations_docs/blob/master/source/Endpoints.rst
 - TradingView Advanced Charts Broker API tutorial: https://www.tradingview.com/charting-library-docs/latest/tutorials/implement-broker-api/
+
+## New implementation direction: Guardian Stop Execution Gateway without a broker REST API
+
+Preferred experiment for brokers that support MetaTrader 5 but do not offer a public trading API. It uses the broker's supported MT5 terminal protocol; it does not intercept TradingView traffic.
+
+### Core idea
+
+Keep TradingView as the charting/research surface. All protected order entry goes through a Guardian Stop order ticket (web/mobile) and a Guardian Stop execution gateway. The gateway routes orders to a user-authorized MetaTrader 5 terminal using the official MT5 terminal integration (Python package or an explicitly installed EA bridge). The broker receives ordinary orders from its supported MT5 terminal; no separate broker REST API partnership is assumed.
+
+The user must not place orders through TradingView's native broker panel for an account claimed to be fully protected, because those orders bypass the Guardian Stop gateway. TradingView can remain open on desktop, browser, or phone for charts, while protected Buy/Sell/Close controls are provided by Guardian Stop.
+
+### Execution topologies
+
+1. **Local execution (first prototype):**
+   - MT5 terminal is installed and logged in by the user.
+   - Guardian Stop Companion attaches through the official MT5 Python integration / an explicitly installed EA bridge.
+   - Guardian Stop mobile/web order ticket submits an order intent to the cloud.
+   - Cloud validates license, account lockout, risk authorization, and idempotency key.
+   - Companion fetches authorized intents over an authenticated outbound channel and executes them through the logged-in MT5 terminal.
+   - If the PC/terminal is offline, Guardian Stop rejects new protected orders and shows the account as unavailable. It must never queue an entry to execute later without fresh risk authorization.
+
+2. **Cloud terminal (later, opt-in):**
+   - A dedicated Windows VPS/VM runs the broker's supported MT5 terminal for that user/account.
+   - The user explicitly authorizes the account login to that terminal; credentials are encrypted and access-controlled.
+   - The terminal is the execution adapter; no broker REST API is required, but broker terms, simultaneous-session rules, and VPS policy must be checked.
+   - This enables mobile order entry even when the user's PC is off.
+   - It does not prevent orders placed through a separate direct broker/TradingView session. Preventing that bypass still requires exclusive account access, broker-side restrictions, or the user's agreement to use only the Guardian Stop route.
+
+### Mobile flow
+
+- TradingView mobile remains the charting surface.
+- Guardian Stop mobile web/app is the order ticket.
+- User enters symbol, side, quantity, order type, and optional SL/TP in Guardian Stop.
+- Guardian Stop validates the request centrally and routes it through the registered MT5 terminal.
+- The app reports broker acknowledgement and reconciles the resulting position/order from MT5.
+- On lockout, cloud rejects new order intents before they reach MT5 and sends close/cancel commands through the terminal adapter.
+- If the user manually trades from TradingView's native broker panel or broker app, that route is outside the gateway and cannot be technically blocked without broker-level account controls.
+
+### Why not proxy or intercept TradingView?
+
+- TradingView content, alerts, webhooks, and market data have display-only restrictions and prohibitions on automated/non-display risk-management and order-generation uses in its current Terms of Use.
+- HTTPS/TLS interception, DOM injection, browser automation, reverse engineering, or undocumented endpoint use is brittle, bypassable, and can violate platform terms. Do not build these as an enforcement path.
+- DNS/proxy blocking cannot distinguish trading orders from chart traffic and does not stop a user on another device/network.
+
+### Security and consistency requirements
+
+- Every order intent is authenticated, bound to user_id + account_id + connector_id, expires quickly, and carries an idempotency key.
+- Central risk authorization is checked at execution time, not only when the mobile ticket is opened.
+- Companion accepts only signed, short-lived commands from Guardian Stop; it cannot invent or replay orders.
+- If cloud lockout is active, local adapter rejects all entry intents and only permits authorized liquidation/cancel actions.
+- After reconnect, reconcile broker positions/orders before re-enabling entry.
+- A close acknowledgement is not a confirmed close; verify via a fresh positions query.
+- Distinguish PROTECTED, LOCKED, OFFLINE, BYPASS_POSSIBLE, and CLOSE_UNCONFIRMED.
+- Never claim a native TradingView account or direct broker session is protected if it can bypass the Guardian Stop gateway.
+
+### Honest product promise
+
+Guardian Stop can guarantee its own order ticket will not submit new entries after lockout and can close positions visible through its authorized MT5 terminal adapter, subject to broker execution and connectivity. It cannot prevent the same user from placing separate orders directly in TradingView, the broker's website, or a phone app unless the broker provides account-level controls or the account is operationally restricted to the Guardian Stop execution path.
+
+### Staged validation
+
+- Phase 1: Deriv Demo remains the current external test broker; test central risk engine and close verification.
+- Phase 2: Build an MT5 execution adapter against a demo terminal and a simulated mobile/web order ticket. No real accounts.
+- Phase 3: Test local terminal topology with PC online/offline, TradingView open/closed, browser changes, and phone order submissions through Guardian Stop.
+- Phase 4: Test cloud MT5 terminal feasibility, broker concurrent-session policy, credential storage, reconnect, and isolation for 3–4 users.
+- Phase 5: Decide whether direct TradingView broker-panel use is unsupported/unprotected, or pursue a broker/TradingView partnership for native order-panel integration.
+
+## Official technical references
+
+- MetaTrader 5 Python integration: https://www.mql5.com/en/docs/python_metatrader5
+- MetaTrader 5 order_send: https://www.mql5.com/en/docs/python_metatrader5/mt5ordersend_py
+- MetaTrader 5 positions_get: https://www.mql5.com/en/docs/python_metatrader5/mt5positionsget_py
+- TradingView terms: https://www.tradingview.com/policies/
+- TradingView broker integration endpoints: https://github.com/tradingview/rest_integrations_docs/blob/master/source/Endpoints.rst
+- NinjaTrader cross-platform account-level risk settings: https://support.ninjatrader.com/s/article/Risk-Settings?language=en_US
