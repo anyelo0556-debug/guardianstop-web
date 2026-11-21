@@ -14,6 +14,18 @@ const DEMO_CONFIG = {
 
 const activeConnections: Map<number, DerivAPI> = new Map();
 
+// The pilot currently uses one shared Deriv demo account. Only administrators
+// may access its balance, portfolio, or execution endpoints until credentials
+// are isolated per user/account.
+function requireDemoOperator(ctx: { user: { role?: string } }) {
+  if (ctx.user.role !== "admin") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "La cuenta demo compartida está habilitada únicamente para administración durante las pruebas.",
+    });
+  }
+}
+
 function getOrCreateConnection(userId: number): DerivAPI {
   if (!activeConnections.has(userId)) activeConnections.set(userId, new DerivAPI(DEMO_CONFIG));
   return activeConnections.get(userId)!;
@@ -29,11 +41,13 @@ async function findUserDerivDemoAccount(userId: number) {
 
 export const derivRouter = createRouter({
   connect: authedQuery.mutation(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = getOrCreateConnection(ctx.user.id);
     return { connected: await api.connect() };
   }),
 
   getAccountInfo: authedQuery.query(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
     const info = await api.getAccountInfo();
@@ -41,18 +55,21 @@ export const derivRouter = createRouter({
   }),
 
   getPortfolio: authedQuery.query(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
     return api.getPortfolio();
   }),
 
   closeAllPositions: authedQuery.mutation(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
     return { closed: await api.closeAllPositions() };
   }),
 
   getBalance: authedQuery.query(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = getOrCreateConnection(ctx.user.id);
     if (!api.isConnected()) await api.connect();
     const info = await api.getAccountInfo();
@@ -108,6 +125,7 @@ export const derivRouter = createRouter({
   }),
 
   disconnect: authedQuery.mutation(async ({ ctx }) => {
+    requireDemoOperator(ctx);
     const api = activeConnections.get(ctx.user.id);
     if (api) {
       api.disconnect();
