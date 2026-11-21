@@ -159,7 +159,7 @@ class AccountMonitor:
             total_pnl=self.total_pnl,
             peak_pnl=self.peak_pnl,
             positions_count=len(self.positions),
-            daily_limit_pct=self.daily_limit_pct,
+            daily_limit_pct=(0.0 if db_client.daily_breach_recorded_today(self.account_id) else self.daily_limit_pct),
             weekly_limit_pct=self.weekly_limit_pct,
             monthly_limit_pct=self.monthly_limit_pct,
             trailing_enabled=self.trailing_enabled,
