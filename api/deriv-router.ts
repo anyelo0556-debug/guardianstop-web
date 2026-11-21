@@ -6,17 +6,27 @@ import DerivAPI, { type ProtectionState } from "./services/DerivAPI";
 import { getDb } from "./queries/connection";
 import { accounts } from "@db/schema";
 
-const DEMO_CONFIG = {
-  appId: "019e0769-496a-7c63-9b8d-cbe709b744e4",
-  apiToken: "pat_85e81e5b3e0efc239ef10b2df8b1db9b4d31ab4d86a28ba682e22abd2c733845",
-  accountId: "VRTC41298507",
-};
+// Demo credentials are supplied only through the deployment secret manager.
+// Never commit broker tokens, account passwords, or API keys to source control.
+function getDemoConfig() {
+  const { DERIV_DEMO_APP_ID, DERIV_DEMO_API_TOKEN, DERIV_DEMO_ACCOUNT_ID } = process.env;
+  if (!DERIV_DEMO_APP_ID || !DERIV_DEMO_API_TOKEN || !DERIV_DEMO_ACCOUNT_ID) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "La conexión demo de Deriv no está configurada en el servidor.",
+    });
+  }
+  return {
+    appId: DERIV_DEMO_APP_ID,
+    apiToken: DERIV_DEMO_API_TOKEN,
+    accountId: DERIV_DEMO_ACCOUNT_ID,
+  };
+}
 
 const activeConnections: Map<number, DerivAPI> = new Map();
 
-// The pilot currently uses one shared Deriv demo account. Only administrators
-// may access its balance, portfolio, or execution endpoints until credentials
-// are isolated per user/account.
+// Shared demo execution remains administrator-only until credentials are isolated
+// per user/account and the test environment is explicitly provisioned.
 function requireDemoOperator(ctx: { user: { role?: string } }) {
   if (ctx.user.role !== "admin") {
     throw new TRPCError({
@@ -27,7 +37,9 @@ function requireDemoOperator(ctx: { user: { role?: string } }) {
 }
 
 function getOrCreateConnection(userId: number): DerivAPI {
-  if (!activeConnections.has(userId)) activeConnections.set(userId, new DerivAPI(DEMO_CONFIG));
+  if (!activeConnections.has(userId)) {
+    activeConnections.set(userId, new DerivAPI(getDemoConfig()));
+  }
   return activeConnections.get(userId)!;
 }
 
@@ -115,7 +127,6 @@ export const derivRouter = createRouter({
     }),
 
   getProtectionLogs: authedQuery.query(async () => {
-    // No fabricated protection events: return only real persisted logs when wired.
     return [];
   }),
 
