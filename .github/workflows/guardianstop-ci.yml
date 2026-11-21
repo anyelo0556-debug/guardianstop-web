@@ -1,0 +1,41 @@
+name: Guardian Stop CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [guardianstop/phase1-risk-security]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardianstop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Typecheck, unit tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production bundle
+        run: npm run build
