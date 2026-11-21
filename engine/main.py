@@ -143,9 +143,6 @@ class AccountMonitor:
         Check if protection should trigger and execute if needed.
         Returns trigger type or None.
         """
-        if len(self.positions) == 0:
-            return None
-
         active_lock = db_client.active_risk_lockout(self.account_id)
         if active_lock:
             if self.broker_name.lower() in ("ig", "deriv"):
