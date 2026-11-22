@@ -6,6 +6,11 @@ Safety: this document does not authorize production changes, migrations, live tr
 
 ## 1. Decision
 
+**Guardian Stop prop-evaluation protection uses a fixed USD cash-loss limit, not a percentage.** The trader selects an amount from **$50.00 USD (minimum) to $300.00 USD (maximum)**. The server validates this range and the risk engine triggers the configured lock when the authoritative cumulative loss reaches or exceeds it. This is Guardian Stop's own protective threshold; it must not be silently replaced with a percentage of nominal account size. The implementation uses integer cents for exact money comparisons. The initial pure calculator is in `api/risk/prop-cash-loss.ts` with tests in `api/risk/prop-cash-loss.test.ts`.
+
+Official prop-firm rules remain a separate compliance layer: where a firm imposes additional conditions, Guardian Stop must disclose and monitor those rules accurately. The fixed $50–$300 Guardian Stop limit does not waive or rewrite a firm's contractual limits.
+
+
 Guardian Stop will expose two account modes over one normalized risk engine:
 
 - REAL: user-owned broker account; rules derive from account configuration and broker/account constraints.
@@ -113,7 +118,13 @@ PC shutdown:
 3. If API_ACCOUNT adapter remains online, continue account monitoring independently of PC.
 4. On reconnect, reconcile authoritative history and positions, then restore verification or open incident review.
 
-## 9. Security controls
+## 9. Security controls and trader agreement
+
+- The trader must accept the current Terms and Conditions before protection is activated. Store user/account identity, document version, acceptance timestamp, and the relevant consent/audit evidence. Re-acceptance is required when a material version change requires it.
+- Required protection settings must be server-enforced. A client-side toggle or modified request must not bypass a mandatory lock or lower/disable a required control.
+- Lock reasons, policy version, trigger measurements, adapter capability and execution result must be recorded in an immutable audit trail.
+- Terms acceptance is not a substitute for clear disclosure: show the trader what Guardian Stop can actually enforce for that platform/session and what remains outside its control.
+
 
 - OAuth state is cryptographically random, stored server-side, single-use, short-lived and bound to user/session.
 - Tokens encrypted with authenticated encryption and envelope versioning; keys held in secret manager, separate from DB.
