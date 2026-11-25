@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import db_client
+from engine.safety import is_demo_account
 from engine.brokers.ig import IGClient
 from engine.brokers.deriv import DerivClient
 from engine.risk import (
@@ -75,6 +76,12 @@ class AccountMonitor:
 
     def connect(self) -> bool:
         """Connect to broker API."""
+        # This legacy engine is not connected to normalized persistent risk
+        # governance yet. Fail closed: only isolated demo accounts may connect.
+        if not is_demo_account(self.account_type):
+            print(f"[ACCOUNT {self.account_id}] LIVE execution blocked: normalized risk governance is not certified.")
+            return False
+
         if self.broker_name.lower() == "ig":
             if not all([self.ig_api_key, self.ig_identifier, self.ig_password]):
                 print(f"[ACCOUNT {self.account_id}] Missing IG credentials")
@@ -248,6 +255,9 @@ def load_accounts() -> List[AccountMonitor]:
     rows = db_client.get_active_accounts()
     monitors = []
     for row in rows:
+        if not is_demo_account(row.get("accountType")):
+            print(f"[ACCOUNT {row.get('accountId', 'unknown')}] LIVE account excluded: demo-only test gate is active.")
+            continue
         mon = AccountMonitor(row)
         monitors.append(mon)
     return monitors
