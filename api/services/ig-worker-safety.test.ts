@@ -7,7 +7,7 @@ import {
 
 describe("IG polling safety gate", () => {
   it("keeps demo accounts available for isolated testing", () => {
-    expect(isIGAccountPollingAllowed(false === true, {})).toBe(true);
+    expect(isIGAccountPollingAllowed(true, {})).toBe(true);
   });
 
   it("blocks live accounts by default", () => {
