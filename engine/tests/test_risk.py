@@ -46,6 +46,7 @@ class RiskLimitTests(unittest.TestCase):
             trailing_protection_pct=30,
             closed_trades=[{"profit_loss": -100, "closed_at": now}],
             floating_pnl=0,
+            now=now,
         )
         self.assertEqual(trigger, "daily_limit")
 
