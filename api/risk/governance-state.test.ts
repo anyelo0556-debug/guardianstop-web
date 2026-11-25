@@ -112,6 +112,27 @@ describe("Guardian Stop governance state machine", () => {
     expect(transitionRiskGovernance(verified, event).discipline).toBe("NORMAL");
   });
 
+  it("does not unlock while a close command is still pending", () => {
+    const locked = transitionRiskGovernance(
+      createInitialRiskGovernanceState("REAL"),
+      { type: "RISK_BREACH", occurredAtMs: 10_000 },
+    );
+    const pending = transitionRiskGovernance(locked, { type: "CLOSE_REQUESTED" });
+    const verified = transitionRiskGovernance(
+      transitionRiskGovernance(
+        transitionRiskGovernance(pending, { type: "HEARTBEAT_LOST" }),
+        { type: "HEARTBEAT_RESTORED" },
+      ),
+      { type: "RECONCILIATION_PASSED" },
+    );
+    expect(transitionRiskGovernance(verified, {
+      type: "UNLOCK_AFTER_LOCKOUT",
+      nowMs: locked.lockoutUntilMs!,
+      riskClear: true,
+      termsAccepted: true,
+    })).toBe(verified);
+  });
+
   it("does not unlock while a close remains unconfirmed", () => {
     const locked = transitionRiskGovernance(
       createInitialRiskGovernanceState("REAL"),
@@ -191,6 +212,18 @@ describe("Guardian Stop governance state machine", () => {
     const confirmed = transitionRiskGovernance(failed, { type: "CLOSE_CONFIRMED" });
     expect(failed.execution).toBe("CLOSE_UNCONFIRMED");
     expect(confirmed.execution).toBe("CLOSE_CONFIRMED");
+  });
+
+  it("prevents switching account mode while telemetry is not current", () => {
+    const initial = createInitialRiskGovernanceState("REAL");
+    const degraded = transitionRiskGovernance(initial, {
+      type: "HEARTBEAT_DEGRADED",
+    });
+    expect(transitionRiskGovernance(degraded, {
+      type: "SET_ACCOUNT_MODE",
+      mode: "PROP",
+      termsAccepted: true,
+    })).toBe(degraded);
   });
 
   it("prevents switching REAL/PROP mode during a lockout or without accepted terms", () => {
