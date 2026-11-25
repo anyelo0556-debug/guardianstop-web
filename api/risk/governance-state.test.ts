@@ -85,6 +85,38 @@ describe("Guardian Stop governance state machine", () => {
     })).toBe(reconciled);
   });
 
+  it("rejects non-finite or unsafe server timestamps when unlocking", () => {
+    const locked = transitionRiskGovernance(
+      createInitialRiskGovernanceState("REAL"),
+      { type: "RISK_BREACH", occurredAtMs: 10_000 },
+    );
+    const verified = transitionRiskGovernance(
+      transitionRiskGovernance(
+        transitionRiskGovernance(locked, { type: "HEARTBEAT_LOST" }),
+        { type: "HEARTBEAT_RESTORED" },
+      ),
+      { type: "RECONCILIATION_PASSED" },
+    );
+    const baseEvent = {
+      type: "UNLOCK_AFTER_LOCKOUT" as const,
+      riskClear: true,
+      termsAccepted: true,
+    };
+
+    expect(transitionRiskGovernance(verified, {
+      ...baseEvent,
+      nowMs: Number.POSITIVE_INFINITY,
+    })).toBe(verified);
+    expect(transitionRiskGovernance(verified, {
+      ...baseEvent,
+      nowMs: Number.NaN,
+    })).toBe(verified);
+    expect(transitionRiskGovernance(verified, {
+      ...baseEvent,
+      nowMs: Number.MAX_SAFE_INTEGER + 1,
+    })).toBe(verified);
+  });
+
   it("requires verified telemetry, clear risk and accepted terms to unlock", () => {
     const locked = transitionRiskGovernance(
       createInitialRiskGovernanceState("REAL"),
@@ -224,6 +256,23 @@ describe("Guardian Stop governance state machine", () => {
       mode: "PROP",
       termsAccepted: true,
     })).toBe(degraded);
+  });
+
+  it("prevents switching REAL/PROP while a close is pending or unconfirmed", () => {
+    const initial = createInitialRiskGovernanceState("REAL");
+    const pending = transitionRiskGovernance(initial, { type: "CLOSE_REQUESTED" });
+    expect(transitionRiskGovernance(pending, {
+      type: "SET_ACCOUNT_MODE",
+      mode: "PROP",
+      termsAccepted: true,
+    })).toBe(pending);
+
+    const unconfirmed = transitionRiskGovernance(pending, { type: "CLOSE_FAILED" });
+    expect(transitionRiskGovernance(unconfirmed, {
+      type: "SET_ACCOUNT_MODE",
+      mode: "PROP",
+      termsAccepted: true,
+    })).toBe(unconfirmed);
   });
 
   it("prevents switching REAL/PROP mode during a lockout or without accepted terms", () => {
