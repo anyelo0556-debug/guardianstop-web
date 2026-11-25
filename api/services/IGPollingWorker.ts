@@ -310,7 +310,7 @@ async function ejecutarProteccion(
       const pendingPositions: IGPosition[] = data.trades.map((trade: any) => ({
         dealId: trade.brokerTradeId,
         symbol: trade.symbol,
-        direction: trade.direction.toUpperCase(),
+        direction: trade.direction.toUpperCase() as "BUY" | "SELL",
         size: trade.lotSize,
         openPrice: trade.entryPrice,
         currentPrice: trade.exitPrice || trade.entryPrice,
