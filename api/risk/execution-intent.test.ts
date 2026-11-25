@@ -52,6 +52,27 @@ describe("durable close intent transitions", () => {
     })).toBe(confirmed);
   });
 
+  it("rejects out-of-order events so an old worker cannot move the attempt clock backwards", () => {
+    const attempted = transitionCloseIntent(pending, {
+      type: "ATTEMPT_UNCONFIRMED",
+      occurredAtMs: 1_800_000_000_000,
+      errorCode: "POSITIONS_REMAINING",
+    });
+    expect(transitionCloseIntent(attempted, {
+      type: "ATTEMPT_UNCONFIRMED",
+      occurredAtMs: 1_799_999_999_999,
+      errorCode: "CLOSE_COMMAND_FAILED",
+    })).toBe(attempted);
+  });
+
+  it("rejects an unknown runtime error code", () => {
+    expect(transitionCloseIntent(pending, {
+      type: "ATTEMPT_UNCONFIRMED",
+      occurredAtMs: 1_800_000_000_000,
+      errorCode: "UNRECOGNIZED" as any,
+    })).toBe(pending);
+  });
+
   it("rejects invalid timestamps without changing the intent", () => {
     expect(transitionCloseIntent(pending, {
       type: "BROKER_FLAT_CONFIRMED",

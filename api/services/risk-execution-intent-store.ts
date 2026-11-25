@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
 import { getDb } from "../queries/connection";
 import { riskExecutionIntents } from "@db/schema";
 import {
@@ -9,6 +9,8 @@ import {
 } from "../risk/execution-intent";
 
 export type StoredCloseIntent = typeof riskExecutionIntents.$inferSelect;
+
+export const DEFAULT_CLOSE_INTENT_LEASE_MS = 120_000;
 
 export async function getPendingCloseIntent(
   accountId: number,
@@ -27,8 +29,9 @@ export async function getPendingCloseIntent(
 }
 
 /**
- * Persist the close intent before calling the broker. If the process stops
- * after this insert, the next worker process can discover and retry it.
+ * Persist the close intent before calling the broker. activeLockKey is unique
+ * per account while pending, so concurrent workers cannot create two active
+ * close intents for the same account.
  */
 export async function ensurePendingCloseIntent(
   accountId: number,
@@ -40,13 +43,23 @@ export async function ensurePendingCloseIntent(
   const idempotencyKey = `${accountId}:${randomUUID()}`;
   const db = getDb();
 
-  await db.insert(riskExecutionIntents).values({
-    idempotencyKey,
-    accountId,
-    reason: reason.slice(0, 64),
-    status: "pending",
-    attemptCount: 0,
-  });
+  try {
+    await db.insert(riskExecutionIntents).values({
+      idempotencyKey,
+      accountId,
+      reason: reason.slice(0, 64),
+      status: "pending",
+      attemptCount: 0,
+      activeLockKey: String(accountId),
+      leaseOwner: null,
+      leaseUntil: null,
+    });
+  } catch (error) {
+    // Another worker may have won the unique activeLockKey insert race.
+    const raced = await getPendingCloseIntent(accountId);
+    if (raced) return raced;
+    throw error;
+  }
 
   const [created] = await db
     .select()
@@ -61,8 +74,65 @@ export async function ensurePendingCloseIntent(
   return created;
 }
 
+/**
+ * Atomically claims a pending intent using a conditional UPDATE. A second
+ * worker can only claim it after the current lease expires or is released.
+ */
+export async function claimPendingCloseIntent(
+  idempotencyKey: string,
+  leaseMs = DEFAULT_CLOSE_INTENT_LEASE_MS,
+): Promise<StoredCloseIntent | null> {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 10 * 60_000) {
+    throw new Error("CLOSE_INTENT_INVALID_LEASE_DURATION");
+  }
+
+  const nowMs = Date.now();
+  const leaseUntilMs = nowMs + leaseMs;
+  if (!Number.isSafeInteger(leaseUntilMs)) {
+    throw new Error("CLOSE_INTENT_INVALID_LEASE_EXPIRY");
+  }
+
+  const leaseOwner = randomUUID();
+  const now = new Date(nowMs);
+  const db = getDb();
+
+  await db
+    .update(riskExecutionIntents)
+    .set({
+      leaseOwner,
+      leaseUntil: new Date(leaseUntilMs),
+      updatedAt: now,
+    })
+    .where(and(
+      eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
+      eq(riskExecutionIntents.status, "pending"),
+      or(
+        isNull(riskExecutionIntents.leaseUntil),
+        lte(riskExecutionIntents.leaseUntil, now),
+      ),
+    ));
+
+  const [claimed] = await db
+    .select()
+    .from(riskExecutionIntents)
+    .where(and(
+      eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
+      eq(riskExecutionIntents.status, "pending"),
+      eq(riskExecutionIntents.leaseOwner, leaseOwner),
+    ))
+    .limit(1);
+
+  return claimed ?? null;
+}
+
+/**
+ * Apply an event only while the caller still owns the lease. Clearing the
+ * lease in the same UPDATE prevents a stale worker from overwriting a newer
+ * claim. Confirmed intents also release the account's unique active lock.
+ */
 export async function recordCloseIntentEvent(
   idempotencyKey: string,
+  leaseOwner: string,
   event:
     | { type: "ATTEMPT_UNCONFIRMED"; errorCode: CloseIntentErrorCode; occurredAtMs?: number }
     | { type: "BROKER_FLAT_CONFIRMED"; occurredAtMs?: number },
@@ -71,11 +141,15 @@ export async function recordCloseIntentEvent(
   const [stored] = await db
     .select()
     .from(riskExecutionIntents)
-    .where(eq(riskExecutionIntents.idempotencyKey, idempotencyKey))
+    .where(and(
+      eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
+      eq(riskExecutionIntents.status, "pending"),
+      eq(riskExecutionIntents.leaseOwner, leaseOwner),
+    ))
     .limit(1);
 
   if (!stored) {
-    throw new Error("CLOSE_INTENT_NOT_FOUND");
+    throw new Error("CLOSE_INTENT_LEASE_LOST");
   }
 
   const occurredAtMs = event.occurredAtMs ?? Date.now();
@@ -91,12 +165,17 @@ export async function recordCloseIntentEvent(
     occurredAtMs,
   } as CloseIntentEvent);
 
-  if (next === current) return;
+  if (next === current) {
+    throw new Error("CLOSE_INTENT_EVENT_REJECTED");
+  }
 
   await db
     .update(riskExecutionIntents)
     .set({
       status: next.status === "CONFIRMED" ? "confirmed" : "pending",
+      activeLockKey: next.status === "CONFIRMED" ? null : String(stored.accountId),
+      leaseOwner: null,
+      leaseUntil: null,
       attemptCount: next.attempts,
       lastAttemptAt: next.lastAttemptAtMs === null
         ? null
@@ -110,5 +189,6 @@ export async function recordCloseIntentEvent(
     .where(and(
       eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
       eq(riskExecutionIntents.status, "pending"),
+      eq(riskExecutionIntents.leaseOwner, leaseOwner),
     ));
 }

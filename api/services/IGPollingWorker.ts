@@ -12,6 +12,7 @@ import { isIGAccountPollingAllowed } from "./ig-worker-safety";
 import {
   ensurePendingCloseIntent,
   getPendingCloseIntent,
+  claimPendingCloseIntent,
   recordCloseIntentEvent,
 } from "./risk-execution-intent-store";
 import {
@@ -270,7 +271,24 @@ async function cerrarYVerificar(
     ? { idempotencyKey: intentKey }
     : await ensurePendingCloseIntent(account.accountId, reason);
   const activeIntentKey = intent.idempotencyKey;
-  const commandResult = await igCloseAllPositions(igSession, positions);
+  const claim = await claimPendingCloseIntent(activeIntentKey);
+  if (!claim?.leaseOwner) {
+    console.log(`[PROTECTION] Account ${account.accountId}: close intent is leased by another worker; duplicate command skipped.`);
+    return false;
+  }
+  const leaseOwner = claim.leaseOwner;
+  let commandResult: { closed: number; failed: number; errors: string[] } = {
+    closed: 0,
+    failed: positions.length,
+    errors: [],
+  };
+  let commandFailed = false;
+  try {
+    commandResult = await igCloseAllPositions(igSession, positions);
+  } catch (error) {
+    commandFailed = true;
+    console.error(`[PROTECTION] Account ${account.accountId}: IG close command failed for ${reason}.`, error);
+  }
   let remainingPositions: IGPosition[] | null = null;
 
   try {
@@ -284,7 +302,7 @@ async function cerrarYVerificar(
   const db = getDb();
 
   if (confirmed) {
-    await recordCloseIntentEvent(activeIntentKey, {
+    await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
       type: "BROKER_FLAT_CONFIRMED",
     });
     closeUnconfirmedAlertAt.delete(account.accountId);
@@ -298,11 +316,13 @@ async function cerrarYVerificar(
     return true;
   }
 
-  await recordCloseIntentEvent(activeIntentKey, {
+  await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
     type: "ATTEMPT_UNCONFIRMED",
     errorCode: remainingPositions === null
       ? "POSITION_QUERY_FAILED"
-      : "POSITIONS_REMAINING",
+      : commandFailed
+        ? "CLOSE_COMMAND_FAILED"
+        : "POSITIONS_REMAINING",
   });
   const now = Date.now();
   const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
@@ -362,7 +382,12 @@ async function ejecutarProteccion(
       return;
     }
 
-    await recordCloseIntentEvent(pendingIntent.idempotencyKey, {
+    const claim = await claimPendingCloseIntent(pendingIntent.idempotencyKey);
+    if (!claim?.leaseOwner) {
+      // Another worker currently owns recovery for this intent.
+      return;
+    }
+    await recordCloseIntentEvent(pendingIntent.idempotencyKey, claim.leaseOwner, {
       type: "BROKER_FLAT_CONFIRMED",
     });
     closeUnconfirmedAlertAt.delete(account.accountId);

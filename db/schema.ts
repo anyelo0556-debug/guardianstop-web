@@ -10,6 +10,7 @@ import {
   decimal,
   boolean,
   index,
+  uniqueIndex,
 } from "drizzle-orm/mysql-core";
 
 // ─── USERS (managed by auth system) ───────────────────────────────
@@ -88,12 +89,19 @@ export const riskExecutionIntents = mysqlTable(
     lastAttemptAt: timestamp("lastAttemptAt"),
     confirmedAt: timestamp("confirmedAt"),
     lastErrorCode: varchar("lastErrorCode", { length: 64 }),
+    // Only pending intents carry this account-scoped unique key. Confirmed
+    // rows set it to NULL so the account can create a later close intent.
+    activeLockKey: varchar("activeLockKey", { length: 191 }),
+    leaseOwner: varchar("leaseOwner", { length: 191 }),
+    leaseUntil: timestamp("leaseUntil"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
   },
   (table) => ({
     accountStatusCreatedIndex: index("risk_execution_intents_account_status_created_idx")
       .on(table.accountId, table.status, table.createdAt),
+    activeLockKeyUniqueIndex: uniqueIndex("risk_execution_intents_active_lock_key_uq")
+      .on(table.activeLockKey),
   }),
 );
 

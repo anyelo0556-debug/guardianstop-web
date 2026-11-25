@@ -30,6 +30,16 @@ function isValidTimestamp(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+const CLOSE_INTENT_ERROR_CODES: readonly CloseIntentErrorCode[] = [
+  "CLOSE_COMMAND_FAILED",
+  "POSITION_QUERY_FAILED",
+  "POSITIONS_REMAINING",
+];
+
+function isValidErrorCode(value: unknown): value is CloseIntentErrorCode {
+  return CLOSE_INTENT_ERROR_CODES.includes(value as CloseIntentErrorCode);
+}
+
 /**
  * Confirmed intents are terminal. A later timeout or retry result must never
  * downgrade an already-confirmed broker-flat observation.
@@ -43,7 +53,10 @@ export function transitionCloseIntent(
     !Number.isSafeInteger(current.attempts) ||
     current.attempts < 0 ||
     !isValidTimestamp(event.occurredAtMs) ||
-    current.attempts >= Number.MAX_SAFE_INTEGER
+    (current.lastAttemptAtMs !== null &&
+      (!isValidTimestamp(current.lastAttemptAtMs) || event.occurredAtMs < current.lastAttemptAtMs)) ||
+    current.attempts >= Number.MAX_SAFE_INTEGER ||
+    (event.type === "ATTEMPT_UNCONFIRMED" && !isValidErrorCode(event.errorCode))
   ) {
     return current;
   }
