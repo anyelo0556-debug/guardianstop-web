@@ -12,7 +12,10 @@ import {
   igAuthenticate,
   igGetFullData,
   igCloseAllPositions,
+  igGetPositions,
   guardarSnapshot,
+  type IGPosition,
+  type IGSession,
 } from "./IGBrokerService";
 
 // ============================================================
@@ -227,6 +230,62 @@ async function pollCuenta(account: WorkerAccount): Promise<void> {
   }
 }
 
+// A close request is not a close confirmation. Re-read the broker's
+// authoritative position list before telling the trader the account is flat.
+const closeUnconfirmedAlertAt = new Map<number, number>();
+
+async function cerrarYVerificar(
+  account: WorkerAccount,
+  igSession: IGSession,
+  positions: IGPosition[],
+  reason: string,
+): Promise<void> {
+  const commandResult = await igCloseAllPositions(igSession, positions);
+  let remainingPositions: IGPosition[] | null = null;
+
+  try {
+    remainingPositions = await igGetPositions(igSession);
+  } catch {
+    // An unavailable verification endpoint is an unconfirmed close, never success.
+    console.error(`[PROTECTION] Account ${account.accountId}: unable to verify IG close after ${reason}`);
+  }
+
+  const confirmed = remainingPositions !== null && remainingPositions.length === 0;
+  const db = getDb();
+
+  if (confirmed) {
+    closeUnconfirmedAlertAt.delete(account.accountId);
+    await db.insert(notifications).values({
+      userId: account.userId,
+      type: "limit_breach",
+      title: "Cierre confirmado por IG",
+      message: `IG ya no reporta posiciones abiertas después de la protección ${reason}. La confirmación se obtuvo consultando nuevamente la cuenta.`,
+    });
+    console.log(`[PROTECTION] Account ${account.accountId}: CLOSE_CONFIRMED after ${reason}`);
+    return;
+  }
+
+  const now = Date.now();
+  const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
+  if (now - lastAlertAt >= 60_000) {
+    const remainingCount = remainingPositions?.length;
+    const verification = remainingCount === undefined
+      ? "No fue posible consultar nuevamente las posiciones."
+      : `IG todavía reporta ${remainingCount} posiciones abiertas.`;
+    await db.insert(notifications).values({
+      userId: account.userId,
+      type: "limit_breach",
+      title: "Cierre no confirmado",
+      message: `Guardian Stop solicitó el cierre por ${reason}, pero no puede confirmar que la cuenta esté plana. ${verification} Solicitudes aceptadas por IG: ${commandResult.closed}; solicitudes fallidas: ${commandResult.failed}. No abras nuevas operaciones. El worker continuará verificando mientras permanezca conectado.`,
+    });
+    closeUnconfirmedAlertAt.set(account.accountId, now);
+  }
+
+  console.error(
+    `[PROTECTION] Account ${account.accountId}: CLOSE_UNCONFIRMED after ${reason}; accepted=${commandResult.closed}; failed=${commandResult.failed}; remaining=${remainingPositions?.length ?? "unknown"}`,
+  );
+}
+
 // ============================================================
 // 4. EJECUTAR PROTECCIÓN (drawdown + trailing)
 // ============================================================
@@ -286,8 +345,7 @@ async function ejecutarProteccion(
       profitPct: 0,
     }));
 
-    const result = await igCloseAllPositions(igSession, positions);
-    console.log(`[PROTECTION] Closed ${result.closed} positions, ${result.failed} failed`);
+    await cerrarYVerificar(account, igSession, positions, "límite diario");
 
     return;
   }
@@ -340,11 +398,13 @@ async function ejecutarProteccion(
           profitPct: 0,
         }));
 
-        const result = await igCloseAllPositions(igSession, positions);
-        console.log(`[PROTECTION] Trailing closed ${result.closed} positions`);
+        await cerrarYVerificar(account, igSession, positions, "trailing stop");
 
-        // Reset peak after close
-        peakPnL.set(account.accountId, 0);
+        // Reset the peak only after the broker confirms there are no open positions.
+        const remainingAfterClose = await igGetPositions(igSession);
+        if (remainingAfterClose.length === 0) {
+          peakPnL.set(account.accountId, 0);
+        }
       }
     }
   }
