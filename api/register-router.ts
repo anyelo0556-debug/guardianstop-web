@@ -41,7 +41,7 @@ async function ensureEmailCredentialsTable() {
 async function hashPassword(pw: string) {
   const salt = randomBytes(16).toString("hex");
   const derivedKey = await scryptAsync(pw, salt, 64);
-  return `scrypt${salt}${derivedKey.toString("hex")}`;
+  return "scrypt$" + salt + "$" + derivedKey.toString("hex");
 }
 
 async function verifyPassword(pw: string, stored: string) {
