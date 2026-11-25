@@ -5,13 +5,25 @@
  */
 
 import { getDb } from "../queries/connection";
-import { accounts, protectionLogs, notifications } from "@db/schema";
+import { accounts, accountCredentials, protectionLogs, notifications } from "@db/schema";
 import { eq, and } from "drizzle-orm";
+import { decryptSecret } from "../lib/credential-vault";
+import { isIGAccountPollingAllowed } from "./ig-worker-safety";
+import {
+  ensurePendingCloseIntent,
+  getPendingCloseIntent,
+  claimPendingCloseIntent,
+  recordCloseIntentEvent,
+  renewPendingCloseIntentLease,
+} from "./risk-execution-intent-store";
 import {
   igAuthenticate,
   igGetFullData,
   igCloseAllPositions,
+  igGetPositions,
   guardarSnapshot,
+  type IGPosition,
+  type IGSession,
 } from "./IGBrokerService";
 
 // ============================================================
@@ -20,6 +32,7 @@ import {
 
 const POLL_INTERVAL_MS = 3000; // 3 segundos
 const SESSION_TTL_MS = 1000 * 60 * 10; // 10 minutos (re-auth cada 10 min)
+const CLOSE_INTENT_LEASE_HEARTBEAT_MS = 30_000;
 
 interface WorkerAccount {
   accountId: number;
@@ -51,6 +64,7 @@ const activeSessions = new Map<number, IGSessionData>();
 const isRunning = new Map<number, boolean>(); // Evita ejecuciones paralelas
 const peakPnL = new Map<number, number>(); // Pico de P&L por cuenta
 const initialBalance = new Map<number, number>(); // Balance inicial por sesión
+const liveAccountBlockedNotice = new Set<number>();
 
 // ============================================================
 // 1. OBTENER CUENTAS ACTIVAS
@@ -60,8 +74,22 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
   const db = getDb();
 
   const results = await db
-    .select()
+    .select({
+      accountId: accounts.id,
+      userId: accounts.userId,
+      accountNumber: accounts.accountNumber,
+      accountType: accounts.accountType,
+      dailyLimitPct: accounts.dailyLimitPct,
+      weeklyLimitPct: accounts.weeklyLimitPct,
+      monthlyLimitPct: accounts.monthlyLimitPct,
+      trailingEnabled: accounts.trailingEnabled,
+      trailingProtectionPct: accounts.trailingProtectionPct,
+      igApiKey: accountCredentials.igApiKey,
+      igIdentifier: accountCredentials.igIdentifier,
+      igPassword: accountCredentials.igPassword,
+    })
     .from(accounts)
+    .leftJoin(accountCredentials, eq(accountCredentials.accountId, accounts.id))
     .where(
       and(
         eq(accounts.isActive, true),
@@ -69,17 +97,49 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
       )
     );
 
-  return results.map(a => ({
-    accountId: a.id,
+  const pollableResults = results.filter((account) => {
+    const isDemo = account.accountType === "demo";
+    if (isIGAccountPollingAllowed(isDemo, process.env)) {
+      liveAccountBlockedNotice.delete(account.accountId);
+      return true;
+    }
+
+    if (!liveAccountBlockedNotice.has(account.accountId)) {
+      console.error(
+        `[WORKER] Account ${account.accountId}: live polling blocked. The IG adapter currently exposes open-position P&L only; enablement requires the normalized risk evaluator and persistent governance to be integrated and validated first.`,
+      );
+      liveAccountBlockedNotice.add(account.accountId);
+    }
+    return false;
+  });
+
+  const decryptForWorker = (
+    value: string | null,
+    accountId: number,
+    field: string,
+  ): string => {
+    if (!value) return "";
+    try {
+      return decryptSecret(value);
+    } catch {
+      // Never log credential material. The account is skipped until the key or
+      // stored ciphertext is corrected.
+      console.error(`[WORKER] Account ${accountId}: unable to decrypt ${field}; skipping authentication.`);
+      return "";
+    }
+  };
+
+  return pollableResults.map(a => ({
+    accountId: a.accountId,
     userId: a.userId,
-    apiKey: process.env.IG_API_KEY || "",
-    username: a.accountNumber || "", // Store IG username here or add a field
-    password: "", // You'll need to store this securely or prompt user
+    apiKey: decryptForWorker(a.igApiKey, a.accountId, "IG API key"),
+    username: a.igIdentifier || "",
+    password: decryptForWorker(a.igPassword, a.accountId, "IG password"),
     accountNumber: a.accountNumber || "",
     isDemo: a.accountType === "demo",
     dailyLimit: Number(a.dailyLimitPct || 1),
     weeklyLimit: Number(a.weeklyLimitPct || 10),
-    monthlyLimit: Number(a.monthlyLimitPct || 30),
+    monthlyLimit: Number(a.monthlyLimitPct || 20),
     trailingEnabled: a.trailingEnabled ?? true,
     trailingProtectPct: Number(a.trailingProtectionPct || 30),
   }));
@@ -99,7 +159,7 @@ async function asegurarSesion(account: WorkerAccount): Promise<IGSessionData | n
 
   // Si no tenemos password, no podemos autenticar
   // En producción, esto vendría de la DB o de un token OAuth
-  if (!account.username || !account.password) {
+  if (!account.apiKey || !account.username || !account.password) {
     console.log(`[WORKER] Account ${account.accountId}: No credentials stored. Skipping.`);
     return null;
   }
@@ -196,6 +256,135 @@ async function pollCuenta(account: WorkerAccount): Promise<void> {
   }
 }
 
+// A close request is not a close confirmation. Re-read the broker's
+// authoritative position list before telling the trader the account is flat.
+const closeUnconfirmedAlertAt = new Map<number, number>();
+
+async function cerrarYVerificar(
+  account: WorkerAccount,
+  igSession: IGSession,
+  positions: IGPosition[],
+  reason: string,
+  intentKey?: string,
+): Promise<boolean> {
+  // Persist the intent before issuing any broker command. A restart can resume
+  // from this row instead of losing the close reason in process memory.
+  const intent = intentKey
+    ? { idempotencyKey: intentKey }
+    : await ensurePendingCloseIntent(account.accountId, reason);
+  const activeIntentKey = intent.idempotencyKey;
+  const claim = await claimPendingCloseIntent(activeIntentKey);
+  if (!claim?.leaseOwner) {
+    console.log(`[PROTECTION] Account ${account.accountId}: close intent is leased by another worker; duplicate command skipped.`);
+    return false;
+  }
+  const leaseOwner = claim.leaseOwner;
+  let leaseLost = false;
+  let renewalInFlight: Promise<void> | null = null;
+  const heartbeat = setInterval(() => {
+    if (leaseLost || renewalInFlight) return;
+    renewalInFlight = renewPendingCloseIntentLease(activeIntentKey, leaseOwner)
+      .then((renewed) => {
+        if (!renewed) {
+          leaseLost = true;
+          console.error(`[PROTECTION] Account ${account.accountId}: close-intent lease expired or was taken over.`);
+        }
+      })
+      .catch((error) => {
+        leaseLost = true;
+        console.error(`[PROTECTION] Account ${account.accountId}: close-intent lease renewal failed.`, error);
+      })
+      .finally(() => {
+        renewalInFlight = null;
+      });
+  }, CLOSE_INTENT_LEASE_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
+  const stopHeartbeat = async (): Promise<void> => {
+    clearInterval(heartbeat);
+    if (renewalInFlight) await renewalInFlight;
+  };
+
+  try {
+    let commandResult: { closed: number; failed: number; errors: string[] } = {
+      closed: 0,
+      failed: positions.length,
+      errors: [],
+    };
+    let commandFailed = false;
+    try {
+      commandResult = await igCloseAllPositions(igSession, positions);
+    } catch (error) {
+      commandFailed = true;
+      console.error(`[PROTECTION] Account ${account.accountId}: IG close command failed for ${reason}.`, error);
+    }
+    let remainingPositions: IGPosition[] | null = null;
+
+    try {
+      remainingPositions = await igGetPositions(igSession);
+    } catch {
+      // An unavailable verification endpoint is an unconfirmed close, never success.
+      console.error(`[PROTECTION] Account ${account.accountId}: unable to verify IG close after ${reason}`);
+    }
+
+    await stopHeartbeat();
+    if (leaseLost) {
+      // Do not write an event from a worker that can no longer prove ownership.
+      // The durable pending intent will be reconciled by the next lease holder.
+      return false;
+    }
+
+    const confirmed = remainingPositions !== null && remainingPositions.length === 0;
+    const db = getDb();
+
+    if (confirmed) {
+      await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
+        type: "BROKER_FLAT_CONFIRMED",
+      });
+      closeUnconfirmedAlertAt.delete(account.accountId);
+      await db.insert(notifications).values({
+        userId: account.userId,
+        type: "limit_breach",
+        title: "Cierre confirmado por IG",
+        message: `IG ya no reporta posiciones abiertas después de la protección ${reason}. La confirmación se obtuvo consultando nuevamente la cuenta.`,
+      });
+      console.log(`[PROTECTION] Account ${account.accountId}: CLOSE_CONFIRMED after ${reason}`);
+      return true;
+    }
+
+    await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
+      type: "ATTEMPT_UNCONFIRMED",
+      errorCode: remainingPositions === null
+        ? "POSITION_QUERY_FAILED"
+        : commandFailed
+          ? "CLOSE_COMMAND_FAILED"
+          : "POSITIONS_REMAINING",
+    });
+    const now = Date.now();
+    const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
+    if (now - lastAlertAt >= 60_000) {
+      const remainingCount = remainingPositions?.length;
+      const verification = remainingCount === undefined
+        ? "No fue posible consultar nuevamente las posiciones."
+        : `IG todavía reporta ${remainingCount} posiciones abiertas.`;
+      await db.insert(notifications).values({
+        userId: account.userId,
+        type: "limit_breach",
+        title: "Cierre no confirmado",
+        message: `Guardian Stop solicitó el cierre por ${reason}, pero no puede confirmar que la cuenta esté plana. ${verification} Solicitudes aceptadas por IG: ${commandResult.closed}; solicitudes fallidas: ${commandResult.failed}. No abras nuevas operaciones. El worker continuará verificando mientras permanezca conectado.`,
+      });
+      closeUnconfirmedAlertAt.set(account.accountId, now);
+    }
+
+    console.error(
+      `[PROTECTION] Account ${account.accountId}: CLOSE_UNCONFIRMED after ${reason}; accepted=${commandResult.closed}; failed=${commandResult.failed}; remaining=${remainingPositions?.length ?? "unknown"}`,
+    );
+    return false;
+  } finally {
+    await stopHeartbeat();
+  }
+}
+
 // ============================================================
 // 4. EJECUTAR PROTECCIÓN (drawdown + trailing)
 // ============================================================
@@ -206,6 +395,51 @@ async function ejecutarProteccion(
   igSession: any
 ): Promise<void> {
   const db = getDb();
+
+  // Recover a durable close intent before evaluating new risk conditions.
+  // This survives process restarts; the broker remains the source of truth.
+  const pendingIntent = await getPendingCloseIntent(account.accountId);
+  if (pendingIntent) {
+    if (data.posicionesAbiertas > 0) {
+      const pendingPositions: IGPosition[] = data.trades.map((trade: any) => ({
+        dealId: trade.brokerTradeId,
+        symbol: trade.symbol,
+        direction: trade.direction.toUpperCase() as "BUY" | "SELL",
+        size: trade.lotSize,
+        openPrice: trade.entryPrice,
+        currentPrice: trade.exitPrice || trade.entryPrice,
+        profit: trade.profitLoss,
+        profitPct: 0,
+      }));
+      await cerrarYVerificar(
+        account,
+        igSession,
+        pendingPositions,
+        pendingIntent.reason,
+        pendingIntent.idempotencyKey,
+      );
+      return;
+    }
+
+    const claim = await claimPendingCloseIntent(pendingIntent.idempotencyKey);
+    if (!claim?.leaseOwner) {
+      // Another worker currently owns recovery for this intent.
+      return;
+    }
+    await recordCloseIntentEvent(pendingIntent.idempotencyKey, claim.leaseOwner, {
+      type: "BROKER_FLAT_CONFIRMED",
+    });
+    closeUnconfirmedAlertAt.delete(account.accountId);
+    await db.insert(notifications).values({
+      userId: account.userId,
+      type: "limit_breach",
+      title: "Cierre confirmado por IG",
+      message: `La consulta de posiciones de IG confirmó que no quedan operaciones abiertas después de ${pendingIntent.reason}.`,
+    });
+    console.log(`[PROTECTION] Account ${account.accountId}: pending close confirmed by fresh polling snapshot`);
+    return;
+  }
+
   const currentPnL = data.trades.reduce((s: number, t: any) => s + (t.profitLoss || 0), 0);
   const balanceInicial = initialBalance.get(account.accountId) || data.balance;
   const effectiveBalance = data.balance + currentPnL;
@@ -255,8 +489,7 @@ async function ejecutarProteccion(
       profitPct: 0,
     }));
 
-    const result = await igCloseAllPositions(igSession, positions);
-    console.log(`[PROTECTION] Closed ${result.closed} positions, ${result.failed} failed`);
+    await cerrarYVerificar(account, igSession, positions, "límite diario");
 
     return;
   }
@@ -309,11 +542,10 @@ async function ejecutarProteccion(
           profitPct: 0,
         }));
 
-        const result = await igCloseAllPositions(igSession, positions);
-        console.log(`[PROTECTION] Trailing closed ${result.closed} positions`);
+        const closeConfirmed = await cerrarYVerificar(account, igSession, positions, "trailing stop");
 
-        // Reset peak after close
-        peakPnL.set(account.accountId, 0);
+        // Reset the peak only after the broker confirms there are no open positions.
+        if (closeConfirmed) peakPnL.set(account.accountId, 0);
       }
     }
   }
@@ -361,10 +593,6 @@ export function detenerWorkerGlobal(): void {
     console.log("[WORKER] Stopped");
   }
 }
-
-// ============================================================
-// 6. ESTADO DEL WORKER (para API)
-// ============================================================
 
 export function getWorkerStatus(): {
   running: boolean;

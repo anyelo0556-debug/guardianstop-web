@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import db_client
+from engine.safety import is_demo_account
 from engine.brokers.ig import IGClient
 from engine.brokers.deriv import DerivClient
 from engine.risk import (
@@ -48,8 +49,10 @@ class AccountMonitor:
         self.account_type = account["accountType"]
         self.initial_balance = float(account["initialCapital"]) if account["initialCapital"] else 0
         self.daily_limit_pct = float(account["dailyLimitPct"]) if account["dailyLimitPct"] else 1.0
-        self.weekly_limit_pct = float(account["weeklyLimitPct"]) if account["weeklyLimitPct"] else 10.0
-        self.monthly_limit_pct = float(account["monthlyLimitPct"]) if account["monthlyLimitPct"] else 30.0
+        if self.daily_limit_pct not in (1.0, 2.0, 3.0):
+            self.daily_limit_pct = 1.0
+        self.weekly_limit_pct = 10.0
+        self.monthly_limit_pct = 20.0
         self.trailing_enabled = bool(account["trailingEnabled"])
         self.trailing_activation_pct = float(account["trailingActivationPct"]) if account["trailingActivationPct"] else 1.0
         self.trailing_protection_pct = float(account["trailingProtectionPct"]) if account["trailingProtectionPct"] else 30.0
@@ -67,12 +70,18 @@ class AccountMonitor:
         self.total_pnl: float = 0.0
         self.peak_pnl: float = 0.0
         self.positions: List[Dict] = []
-        self.closed_trades_cache: List[Dict] = []
+        self.closed_trades_cache: List[Dict] = db_client.get_closed_trades(self.account_id)
         self.last_check = 0
         self.trailing_fired = False
 
     def connect(self) -> bool:
         """Connect to broker API."""
+        # This legacy engine is not connected to normalized persistent risk
+        # governance yet. Fail closed: only isolated demo accounts may connect.
+        if not is_demo_account(self.account_type):
+            print(f"[ACCOUNT {self.account_id}] LIVE execution blocked: normalized risk governance is not certified.")
+            return False
+
         if self.broker_name.lower() == "ig":
             if not all([self.ig_api_key, self.ig_identifier, self.ig_password]):
                 print(f"[ACCOUNT {self.account_id}] Missing IG credentials")
@@ -124,7 +133,10 @@ class AccountMonitor:
                 if bal is not None:
                     self.current_balance = bal
                 self.positions = self.client.get_positions()
-                self.total_pnl = sum(p.get("profit", 0) for p in self.positions)
+                self.total_pnl = sum(float(p.get("profit", 0) or 0) for p in self.positions)
+
+            # Refresh the closed-trade ledger on every poll to include newly realized losses.
+            self.closed_trades_cache = db_client.get_closed_trades(self.account_id)
 
             # Track peak P&L for trailing stop
             if self.total_pnl > self.peak_pnl:
@@ -141,8 +153,12 @@ class AccountMonitor:
         Check if protection should trigger and execute if needed.
         Returns trigger type or None.
         """
-        if len(self.positions) == 0:
-            return None
+        active_lock = db_client.active_risk_lockout(self.account_id)
+        if active_lock:
+            if self.broker_name.lower() in ("ig", "deriv"):
+                closed_count, failed_count = self.client.close_all(self.positions)
+                print(f"[ACCOUNT {self.account_id}] Lock active ({active_lock}); closed {closed_count}, failed {failed_count}")
+            return active_lock
 
         trigger = check_protection(
             initial_balance=self.initial_balance,
@@ -150,16 +166,19 @@ class AccountMonitor:
             total_pnl=self.total_pnl,
             peak_pnl=self.peak_pnl,
             positions_count=len(self.positions),
-            daily_limit_pct=self.daily_limit_pct,
+            daily_limit_pct=(0.0 if db_client.daily_breach_recorded_today(self.account_id) else self.daily_limit_pct),
             weekly_limit_pct=self.weekly_limit_pct,
             monthly_limit_pct=self.monthly_limit_pct,
             trailing_enabled=self.trailing_enabled,
             trailing_activation_pct=self.trailing_activation_pct,
             trailing_protection_pct=self.trailing_protection_pct,
             closed_trades=self.closed_trades_cache,
+            floating_pnl=sum(float(p.get("profit", 0) or 0) for p in self.positions),
         )
 
         if trigger and self.client:
+            if trigger in ("daily_limit", "weekly_limit", "monthly_limit"):
+                trigger = db_client.record_risk_breach(self.account_id, trigger)
             print(f"[ACCOUNT {self.account_id}] PROTECTION TRIGGERED: {trigger}")
 
             # Calculate stats before closing
@@ -172,6 +191,7 @@ class AccountMonitor:
                 self.weekly_limit_pct,
                 self.monthly_limit_pct,
                 self.closed_trades_cache,
+                floating_pnl=sum(float(p.get("profit", 0) or 0) for p in self.positions),
             )
 
             # Close all positions
@@ -235,6 +255,9 @@ def load_accounts() -> List[AccountMonitor]:
     rows = db_client.get_active_accounts()
     monitors = []
     for row in rows:
+        if not is_demo_account(row.get("accountType")):
+            print(f"[ACCOUNT {row.get('accountId', 'unknown')}] LIVE account excluded: demo-only test gate is active.")
+            continue
         mon = AccountMonitor(row)
         monitors.append(mon)
     return monitors
@@ -250,6 +273,7 @@ def main_loop():
     # Ensure tables exist
     db_client.ensure_credentials_table()
     db_client.ensure_state_table()
+    db_client.ensure_risk_lockouts_table()
 
     monitors: List[AccountMonitor] = []
     last_account_refresh = 0
@@ -309,6 +333,7 @@ def main_loop():
                     monitor.weekly_limit_pct,
                     monitor.monthly_limit_pct,
                     monitor.closed_trades_cache,
+                    floating_pnl=sum(float(p.get("profit", 0) or 0) for p in monitor.positions),
                 )
 
                 print(

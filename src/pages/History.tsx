@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Clock, TrendingUp, TrendingDown, Shield, AlertTriangle } from "lucide-react";
+import { Clock, TrendingUp, Shield, AlertTriangle } from "lucide-react";
 
 interface TradeRecord {
   time: string;

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { scrypt, randomBytes, timingSafeEqual } from "node:crypto";
+import { scrypt as scryptCallback, randomBytes, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import * as cookie from "cookie";
 import { createRouter, publicQuery } from "./middleware";
 import { Session } from "@contracts/constants";
@@ -13,6 +14,12 @@ import { createSubscription } from "./queries/subscriptions";
 import { sendWelcomeEmail } from "./services/EmailService";
 import { getDb } from "./queries/connection";
 import * as schema from "@db/schema";
+
+const scryptAsync = promisify(scryptCallback) as (
+  password: string,
+  salt: string,
+  keylen: number,
+) => Promise<Buffer>;
 
 let tableEnsured = false;
 async function ensureEmailCredentialsTable() {
@@ -31,15 +38,19 @@ async function ensureEmailCredentialsTable() {
   tableEnsured = true;
 }
 
-function hashPassword(pw: string) {
+async function hashPassword(pw: string) {
   const salt = randomBytes(16).toString("hex");
-  return `scrypt$${salt}$${scrypt(pw, salt, 64).toString("hex")}`;
+  const derivedKey = await scryptAsync(pw, salt, 64);
+  return "scrypt$" + salt + "$" + derivedKey.toString("hex");
 }
 
-function verifyPassword(pw: string, stored: string) {
+async function verifyPassword(pw: string, stored: string) {
   const [algo, salt, hash] = stored.split("$");
   if (algo !== "scrypt" || !salt || !hash) return false;
-  return timingSafeEqual(scrypt(pw, salt, 64), Buffer.from(hash, "hex"));
+
+  const actual = await scryptAsync(pw, salt, 64);
+  const expected = Buffer.from(hash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 async function setSessionCookie(resHeaders: Headers, reqHeaders: Headers, unionId: string) {
@@ -86,7 +97,7 @@ export const registerRouter = createRouter({
       }
       const user = (await findUserByUnionId(unionId))!;
 
-      await createEmailCredential({ userId: user.id, email, passwordHash: hashPassword(input.password) });
+      await createEmailCredential({ userId: user.id, email, passwordHash: await hashPassword(input.password) });
 
       const sub = await createSubscription({
         userId: user.id,
@@ -121,7 +132,7 @@ export const registerRouter = createRouter({
       const email = input.email.toLowerCase().trim();
       await ensureEmailCredentialsTable();
       const creds = await findCredentialByEmail(email);
-      if (!creds || !verifyPassword(input.password, creds.passwordHash)) {
+      if (!creds || !(await verifyPassword(input.password, creds.passwordHash))) {
         throw new TRPCError({ code: "UNAUTHORIZED", message: "Correo o contraseña incorrectos." });
       }
       const user = (await findUserByUnionId(`email:${email}`))!;

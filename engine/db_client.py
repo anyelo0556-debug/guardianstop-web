@@ -4,7 +4,7 @@ Reads account configs and writes trade/protection logs.
 """
 import os
 import pymysql
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from contextlib import contextmanager
 
@@ -57,35 +57,45 @@ def _conn():
 
 # ── ACCOUNT CONFIG ──────────────────────────────────────────────
 
+def _decrypt_secret(value):
+    """Decrypt AES-256-GCM values from the Node API; allow legacy plaintext during migration."""
+    if not value or not value.startswith("enc:v1:"):
+        return value or ""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key_hex = os.environ.get("CREDENTIALS_ENCRYPTION_KEY", "")
+    if len(key_hex) != 64:
+        raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY must be a 32-byte hex key")
+    try:
+        _, version, iv_hex, tag_hex, ciphertext_hex = value.split(":", 4)
+        if version != "v1":
+            raise ValueError("Unsupported credential encryption version")
+        aes = AESGCM(bytes.fromhex(key_hex))
+        encrypted = bytes.fromhex(ciphertext_hex) + bytes.fromhex(tag_hex)
+        return aes.decrypt(bytes.fromhex(iv_hex), encrypted, None).decode("utf-8")
+    except Exception as exc:
+        raise RuntimeError("Unable to decrypt broker credential; verify the shared encryption key") from exc
+
 def get_active_accounts() -> List[Dict]:
-    """Fetch all active trading accounts with broker credentials.
-    Reads from account_credentials; if no linked account, uses defaults."""
+    """Load only active, fully linked trading accounts and decrypt secrets in memory."""
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    ac.accountId,
-                    COALESCE(a.userId, 1) AS userId,
-                    COALESCE(a.brokerName, 'ig') AS brokerName,
-                    COALESCE(a.accountNumber, '') AS accountNumber,
-                    COALESCE(a.accountType, 'demo') AS accountType,
-                    COALESCE(a.initialCapital, 10000) AS initialCapital,
-                    COALESCE(a.currentBalance, 10000) AS currentBalance,
-                    COALESCE(a.dailyLimitPct, 1.0) AS dailyLimitPct,
-                    COALESCE(a.weeklyLimitPct, 10.0) AS weeklyLimitPct,
-                    COALESCE(a.monthlyLimitPct, 30.0) AS monthlyLimitPct,
-                    COALESCE(a.trailingEnabled, 0) AS trailingEnabled,
-                    COALESCE(a.trailingActivationPct, 1.0) AS trailingActivationPct,
-                    COALESCE(a.trailingProtectionPct, 30.0) AS trailingProtectionPct,
-                    COALESCE(a.isActive, 1) AS isActive,
-                    ac.igApiKey,
-                    ac.igIdentifier,
-                    ac.igPassword,
-                    ac.derivApiToken
-                FROM account_credentials ac
-                LEFT JOIN accounts a ON a.id = ac.accountId
+                    a.id AS accountId, a.userId, a.brokerName, a.accountNumber,
+                    a.accountType, a.initialCapital, a.currentBalance,
+                    a.dailyLimitPct, 10.0 AS weeklyLimitPct,
+                    20.0 AS monthlyLimitPct,
+                    a.trailingEnabled, a.trailingActivationPct, a.trailingProtectionPct,
+                    a.isActive, ac.igApiKey, ac.igIdentifier, ac.igPassword, ac.derivApiToken
+                FROM accounts a
+                INNER JOIN account_credentials ac ON ac.accountId = a.id
+                WHERE a.isActive = 1 AND a.accountType = 'demo'
             """)
-            return cur.fetchall()
+            rows = cur.fetchall()
+    for row in rows:
+        for field in ("igApiKey", "igPassword", "derivApiToken"):
+            row[field] = _decrypt_secret(row.get(field))
+    return rows
 
 # ── CREDENTIALS TABLE (must exist) ──────────────────────────────
 
@@ -97,10 +107,10 @@ def ensure_credentials_table():
                 CREATE TABLE IF NOT EXISTS account_credentials (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     accountId BIGINT UNSIGNED NOT NULL,
-                    igApiKey VARCHAR(255),
+                    igApiKey TEXT,
                     igIdentifier VARCHAR(100),
                     igPassword TEXT,
-                    derivApiToken VARCHAR(255),
+                    derivApiToken TEXT,
                     createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     UNIQUE KEY (accountId)
@@ -169,6 +179,18 @@ def update_trade_closed(
                 WHERE id = %s
             """, (exit_price, profit_loss, profit_loss_pct, result_type, protection_trigger, notes, trade_id))
 
+
+def get_closed_trades(account_id: int) -> List[Dict]:
+    """Load the closed-trade ledger used to rebuild risk budgets after restart."""
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT profitLoss AS profit_loss, closedAt AS closed_at
+                FROM trades
+                WHERE accountId = %s AND status = 'closed' AND closedAt IS NOT NULL
+            """, (account_id,))
+            return cur.fetchall()
+
 # ── PROTECTION LOGS ─────────────────────────────────────────────
 
 def insert_protection_log(
@@ -220,6 +242,122 @@ def insert_notification(
                 VALUES (%s, %s, %s, %s)
             """, (user_id, notif_type, title, message))
             return cur.lastrowid
+
+
+def ensure_risk_lockouts_table():
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS risk_lockouts (
+                    accountId BIGINT UNSIGNED PRIMARY KEY,
+                    dailyLockedUntil DATETIME NULL,
+                    dailyBreachKey VARCHAR(10) NULL,
+                    weeklyLockedUntil DATETIME NULL,
+                    monthlyLockedUntil DATETIME NULL,
+                    monthKey VARCHAR(7) NULL,
+                    weeklyBreachWeeks TEXT NULL,
+                    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'risk_lockouts'
+                  AND COLUMN_NAME = 'dailyBreachKey'
+            """)
+            if not cur.fetchone()["n"]:
+                cur.execute("ALTER TABLE risk_lockouts ADD COLUMN dailyBreachKey VARCHAR(10) NULL")
+
+
+def get_risk_lockout(account_id: int):
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
+            return cur.fetchone()
+
+def daily_breach_recorded_today(account_id: int, now: Optional[datetime] = None) -> bool:
+    from engine.risk import get_trading_day_key
+    state = get_risk_lockout(account_id)
+    return bool(state and state.get("dailyBreachKey") == get_trading_day_key(now))
+
+def active_risk_lockout(account_id: int, now: Optional[datetime] = None) -> Optional[str]:
+    now = now or datetime.utcnow()
+    state = get_risk_lockout(account_id)
+    if not state:
+        return None
+    for field, label in (
+        ("monthlyLockedUntil", "monthly_limit"),
+        ("weeklyLockedUntil", "weekly_limit"),
+        ("dailyLockedUntil", "daily_limit"),
+    ):
+        until = state.get(field)
+        if until and now < until:
+            return label
+    return None
+
+def _end_of_trading_week(now: datetime) -> datetime:
+    days = (6 - now.weekday()) % 7
+    target = (now + timedelta(days=days)).replace(hour=22, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=7)
+    return target
+
+def _end_of_trading_month(now: datetime) -> datetime:
+    year, month = now.year, now.month + 1
+    if month == 13:
+        year, month = year + 1, 1
+    return datetime(year, month, 1, 22, 0, 0)
+
+def record_risk_breach(account_id: int, trigger: str, now: Optional[datetime] = None) -> str:
+    from engine.risk import get_trading_day_key, get_trading_month_key, get_trading_week_key
+    now = now or datetime.utcnow()
+    ensure_risk_lockouts_table()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM risk_lockouts WHERE accountId=%s LIMIT 1", (account_id,))
+            state = cur.fetchone() or {}
+            daily_until = state.get("dailyLockedUntil")
+            daily_breach_key = state.get("dailyBreachKey")
+            weekly_until = state.get("weeklyLockedUntil")
+            monthly_until = state.get("monthlyLockedUntil")
+            month_key = get_trading_month_key(now)
+            stored_month = state.get("monthKey")
+            weeks = [] if stored_month != month_key else [
+                item for item in (state.get("weeklyBreachWeeks") or "").split(",") if item
+            ]
+
+            result = trigger
+            if trigger == "daily_limit":
+                # Permit one 12-hour cooldown per trading day, then allow resume.
+                current_day = get_trading_day_key(now)
+                if daily_breach_key == current_day:
+                    return "daily_limit"
+                daily_breach_key = current_day
+                daily_until = now + timedelta(hours=12)
+            elif trigger == "weekly_limit":
+                week_key = get_trading_week_key(now)
+                if week_key not in weeks:
+                    weeks.append(week_key)
+                if len(weeks) >= 2:
+                    monthly_until = _end_of_trading_month(now)
+                    result = "monthly_limit"
+                else:
+                    weekly_until = _end_of_trading_week(now)
+            elif trigger == "monthly_limit":
+                monthly_until = _end_of_trading_month(now)
+
+            cur.execute("""
+                INSERT INTO risk_lockouts
+                    (accountId, dailyLockedUntil, dailyBreachKey, weeklyLockedUntil, monthlyLockedUntil, monthKey, weeklyBreachWeeks)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    dailyLockedUntil=VALUES(dailyLockedUntil),
+                    dailyBreachKey=VALUES(dailyBreachKey),
+                    weeklyLockedUntil=VALUES(weeklyLockedUntil),
+                    monthlyLockedUntil=VALUES(monthlyLockedUntil),
+                    monthKey=VALUES(monthKey),
+                    weeklyBreachWeeks=VALUES(weeklyBreachWeeks)
+            """, (account_id, daily_until, daily_breach_key, weekly_until, monthly_until, month_key, ",".join(weeks)))
+    return result
 
 # ── RUNTIME STATE (in-memory table for engine heartbeat) ────────
 

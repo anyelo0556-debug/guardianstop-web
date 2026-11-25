@@ -173,15 +173,6 @@ export default function BrokerPanel() {
     console.log("[BrokerPanel]", msg);
   }, []);
 
-  // ─── Trading Day Helper ─────────────────────────────────────
-  // Forex trading day ends at 17:00 NY (22:00 UTC), not local midnight
-  const getTradingDayKey = useCallback(() => {
-    const now = new Date();
-    // Convert to UTC, subtract 22 hours → find the "trading day" boundary
-    const d = new Date(now.getTime() - 22 * 60 * 60 * 1000);
-    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-  }, []);
-
   // Derived: realized daily loss from SESSION ledger (only losses, idempotent)
   // Ledger is cleared on disconnect — each session starts fresh
   const realizedDailyLoss = useMemo(() => {
@@ -237,13 +228,6 @@ export default function BrokerPanel() {
     setLogs([]);
     addRaw("[DEMO] Modo demostración desactivado");
   }, [addRaw]);
-
-  // ─── Trading day tick: force recalc of realizedDailyLoss at day boundary ───
-  const [tradingDayTick, setTradingDayTick] = useState(Date.now());
-  useEffect(() => {
-    const interval = setInterval(() => setTradingDayTick(Date.now()), 60000); // every minute
-    return () => clearInterval(interval);
-  }, []);
 
   // ─── tRPC: save credentials for Risk Engine ───────────────────
   const saveCredentials = trpc.credentials.save.useMutation();

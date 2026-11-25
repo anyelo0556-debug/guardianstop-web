@@ -9,6 +9,8 @@ import {
   int,
   decimal,
   boolean,
+  index,
+  uniqueIndex,
 } from "drizzle-orm/mysql-core";
 
 // ─── USERS (managed by auth system) ───────────────────────────────
@@ -43,7 +45,7 @@ export const accounts = mysqlTable("accounts", {
   currentBalance: decimal("currentBalance", { precision: 15, scale: 2 }).notNull(),
   dailyLimitPct: decimal("dailyLimitPct", { precision: 5, scale: 2 }).default("1.00").notNull(),
   weeklyLimitPct: decimal("weeklyLimitPct", { precision: 5, scale: 2 }).default("10.00").notNull(),
-  monthlyLimitPct: decimal("monthlyLimitPct", { precision: 5, scale: 2 }).default("30.00").notNull(),
+  monthlyLimitPct: decimal("monthlyLimitPct", { precision: 5, scale: 2 }).default("20.00").notNull(),
   trailingEnabled: boolean("trailingEnabled").default(false).notNull(),
   trailingActivationPct: decimal("trailingActivationPct", { precision: 5, scale: 2 }).default("1.00").notNull(),
   trailingProtectionPct: decimal("trailingProtectionPct", { precision: 5, scale: 2 }).default("30.00").notNull(),
@@ -62,16 +64,46 @@ export const accountCredentials = mysqlTable("account_credentials", {
   accountId: bigint("accountId", { mode: "number", unsigned: true })
     .notNull()
     .references(() => accounts.id, { onDelete: "cascade" }),
-  igApiKey: varchar("igApiKey", { length: 255 }),
+  igApiKey: text("igApiKey"),
   igIdentifier: varchar("igIdentifier", { length: 100 }),
   igPassword: text("igPassword"),
-  derivApiToken: varchar("derivApiToken", { length: 255 }),
+  derivApiToken: text("derivApiToken"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
 });
 
 export type AccountCredential = typeof accountCredentials.$inferSelect;
 export type InsertAccountCredential = typeof accountCredentials.$inferInsert;
+
+// ─── DURABLE BROKER CLOSE INTENTS ─────────────────────────────────
+export const riskExecutionIntents = mysqlTable(
+  "risk_execution_intents",
+  {
+    idempotencyKey: varchar("idempotencyKey", { length: 191 }).primaryKey(),
+    accountId: bigint("accountId", { mode: "number", unsigned: true })
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    reason: varchar("reason", { length: 64 }).notNull(),
+    status: mysqlEnum("status", ["pending", "confirmed"]).default("pending").notNull(),
+    attemptCount: int("attemptCount").default(0).notNull(),
+    lastAttemptAt: timestamp("lastAttemptAt"),
+    confirmedAt: timestamp("confirmedAt"),
+    lastErrorCode: varchar("lastErrorCode", { length: 64 }),
+    // Only pending intents carry this account-scoped unique key. Confirmed
+    // rows set it to NULL so the account can create a later close intent.
+    activeLockKey: varchar("activeLockKey", { length: 191 }),
+    leaseOwner: varchar("leaseOwner", { length: 191 }),
+    leaseUntil: timestamp("leaseUntil"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+  (table) => ({
+    accountStatusCreatedIndex: index("risk_execution_intents_account_status_created_idx")
+      .on(table.accountId, table.status, table.createdAt),
+    activeLockKeyUniqueIndex: uniqueIndex("risk_execution_intents_active_lock_key_uq")
+      .on(table.activeLockKey),
+  }),
+);
 
 // ─── SUBSCRIPTIONS ────────────────────────────────────────────────
 export const subscriptions = mysqlTable("subscriptions", {

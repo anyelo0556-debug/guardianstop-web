@@ -16,7 +16,7 @@ export default function RiskSimulator() {
 
   const dailyLimit = c * 0.01;
   const weeklyLimit = c * 0.10;
-  const monthlyLimit = c * 0.30;
+  const monthlyLimit = c * 0.20;
 
   const trailingData = [
     { profitPct: 1, profit: c * 0.01, protectedAmt: c * 0.01 * 0.30 },
@@ -156,7 +156,7 @@ export default function RiskSimulator() {
             <span className="text-[10px] font-bold text-gs-gold uppercase tracking-wider">{t.monthly}</span>
           </div>
           <p className="text-2xl font-bold text-white font-mono">{fmt(monthlyLimit)}</p>
-          <p className="text-[10px] text-gs-muted mt-1">30% {lang === "es" ? "del capital" : "of capital"}</p>
+          <p className="text-[10px] text-gs-muted mt-1">20% {lang === "es" ? "del capital" : "of capital"}</p>
         </div>
       </div>
 

@@ -1,67 +1,108 @@
 /**
- * CREDENTIALS ROUTER — Guarda credenciales de broker para el Risk Engine Python
+ * Broker credentials are account-owned and encrypted before persistence.
+ * Secrets are never returned to the browser after being saved.
  */
-
 import { z } from "zod";
-import { createRouter, publicQuery } from "./middleware";
+import { TRPCError } from "@trpc/server";
+import { createRouter, authedQuery } from "./middleware";
 import { getDb } from "./queries/connection";
-import { accountCredentials } from "@db/schema";
-import { eq } from "drizzle-orm";
+import { accounts, accountCredentials } from "@db/schema";
+import { encryptSecret } from "./lib/credential-vault";
+import { and, eq } from "drizzle-orm";
+
+const secretSchema = z.string().min(1).max(2048).optional();
+
+function encryptSecretForApi(value: string): string {
+  try {
+    return encryptSecret(value);
+  } catch {
+    throw new TRPCError({
+      code: "INTERNAL_SERVER_ERROR",
+      message: "Broker credential encryption is not configured",
+    });
+  }
+}
 
 export const credentialsRouter = createRouter({
-  save: publicQuery
-    .input(
-      z.object({
-        accountId: z.number(),
-        broker: z.enum(["ig", "deriv"]),
-        igApiKey: z.string().optional(),
-        igIdentifier: z.string().optional(),
-        igPassword: z.string().optional(),
-        derivApiToken: z.string().optional(),
-      })
-    )
-    .mutation(async ({ input }) => {
+  save: authedQuery
+    .input(z.object({
+      accountId: z.number().int().positive(),
+      broker: z.enum(["ig", "deriv"]),
+      igApiKey: secretSchema,
+      igIdentifier: z.string().min(1).max(100).optional(),
+      igPassword: secretSchema,
+      derivApiToken: secretSchema,
+    }).refine((v) => Boolean(v.igApiKey || v.igIdentifier || v.igPassword || v.derivApiToken), {
+      message: "At least one credential field must be supplied",
+    }))
+    .mutation(async ({ input, ctx }) => {
       const db = getDb();
+      const owned = await db.select({ id: accounts.id, brokerName: accounts.brokerName })
+        .from(accounts)
+        .where(and(eq(accounts.id, input.accountId), eq(accounts.userId, ctx.user.id)))
+        .limit(1);
 
-      // Upsert credentials
-      const existing = await db
-        .select()
+      if (!owned.length) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Trading account not found" });
+      }
+      if (owned[0].brokerName.toLowerCase() !== input.broker) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Broker does not match the trading account" });
+      }
+
+      const values: { igApiKey?: string; igIdentifier?: string; igPassword?: string; derivApiToken?: string } = {};
+      if (input.igApiKey !== undefined) values.igApiKey = encryptSecretForApi(input.igApiKey);
+      if (input.igIdentifier !== undefined) values.igIdentifier = input.igIdentifier;
+      if (input.igPassword !== undefined) values.igPassword = encryptSecretForApi(input.igPassword);
+      if (input.derivApiToken !== undefined) values.derivApiToken = encryptSecretForApi(input.derivApiToken);
+
+      const existing = await db.select({ id: accountCredentials.id })
         .from(accountCredentials)
         .where(eq(accountCredentials.accountId, input.accountId))
         .limit(1);
 
-      if (existing.length > 0) {
-        await db
-          .update(accountCredentials)
-          .set({
-            igApiKey: input.igApiKey || existing[0].igApiKey,
-            igIdentifier: input.igIdentifier || existing[0].igIdentifier,
-            igPassword: input.igPassword || existing[0].igPassword,
-            derivApiToken: input.derivApiToken || existing[0].derivApiToken,
-          })
+      if (existing.length) {
+        await db.update(accountCredentials).set(values)
           .where(eq(accountCredentials.accountId, input.accountId));
       } else {
         await db.insert(accountCredentials).values({
           accountId: input.accountId,
-          igApiKey: input.igApiKey || null,
-          igIdentifier: input.igIdentifier || null,
-          igPassword: input.igPassword || null,
-          derivApiToken: input.derivApiToken || null,
+          igApiKey: values.igApiKey ?? null,
+          igIdentifier: values.igIdentifier ?? null,
+          igPassword: values.igPassword ?? null,
+          derivApiToken: values.derivApiToken ?? null,
         });
       }
-
       return { success: true };
     }),
 
-  get: publicQuery
-    .input(z.object({ accountId: z.number() }))
-    .query(async ({ input }) => {
+  get: authedQuery
+    .input(z.object({ accountId: z.number().int().positive() }))
+    .query(async ({ input, ctx }) => {
       const db = getDb();
-      const rows = await db
-        .select()
-        .from(accountCredentials)
+      const owned = await db.select({ id: accounts.id, brokerName: accounts.brokerName })
+        .from(accounts)
+        .where(and(eq(accounts.id, input.accountId), eq(accounts.userId, ctx.user.id)))
+        .limit(1);
+      if (!owned.length) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Trading account not found" });
+      }
+      const rows = await db.select({
+        igApiKey: accountCredentials.igApiKey,
+        igIdentifier: accountCredentials.igIdentifier,
+        igPassword: accountCredentials.igPassword,
+        derivApiToken: accountCredentials.derivApiToken,
+      }).from(accountCredentials)
         .where(eq(accountCredentials.accountId, input.accountId))
         .limit(1);
-      return rows[0] || null;
+      const row = rows[0];
+      return {
+        accountId: input.accountId,
+        broker: owned[0].brokerName,
+        configured: Boolean(row),
+        hasIgApiKey: Boolean(row?.igApiKey),
+        hasIgIdentifier: Boolean(row?.igIdentifier),
+        hasIgPassword: Boolean(row?.igPassword),
+        hasDerivApiToken: Boolean(row?.derivApiToken),
+      };
     }),
 });

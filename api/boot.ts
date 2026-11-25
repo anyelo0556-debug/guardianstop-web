@@ -7,7 +7,6 @@ import { createContext } from "./context";
 import { env } from "./lib/env";
 import { createOAuthCallbackHandler } from "./kimi/auth";
 import { Paths } from "@contracts/constants";
-import { iniciarWorkerGlobal } from "./services/IGPollingWorker";
 
 const app = new Hono<{ Bindings: HttpBindings }>();
 
@@ -33,7 +32,5 @@ if (env.isProduction) {
   const port = parseInt(process.env.PORT || "3000");
   serve({ fetch: app.fetch, port }, () => {
     console.log(`Server running on http://localhost:${port}/`);
-    // Iniciar worker de IG 24/7
-    iniciarWorkerGlobal().catch(console.error);
   });
 }

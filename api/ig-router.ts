@@ -1,85 +1,63 @@
 /**
- * IG ROUTER — Endpoints para el dashboard de Guardian Stop
- * Permite al frontend ver estado, historial, y controlar el worker.
+ * IG ROUTER — Authenticated dashboard endpoints.
+ *
+ * Every account-scoped read is constrained to the authenticated owner.
+ * Global worker controls are administrator-only.
  */
-
 import { z } from "zod";
-import { createRouter, publicQuery } from "./middleware";
+import { TRPCError } from "@trpc/server";
+import { createRouter, authedQuery, adminQuery } from "./middleware";
 import { getDb } from "./queries/connection";
 import { accounts, trades, protectionLogs, notifications } from "@db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { getWorkerStatus, iniciarWorkerGlobal, detenerWorkerGlobal } from "./services/IGPollingWorker";
 
-export const igRouter = createRouter({
-  // ============================================================
-  // 1. ESTADO DEL WORKER
-  // ============================================================
-  workerStatus: publicQuery.query(async () => {
-    return getWorkerStatus();
-  }),
+const accountIdSchema = z.number().int().positive();
+const boundedLimit = (fallback: number, max: number) =>
+  z.number().int().min(1).max(max).default(fallback);
 
-  // ============================================================
-  // 2. INICIAR/DETENER WORKER
-  // ============================================================
-  startWorker: publicQuery.mutation(async () => {
+async function requireOwnedAccount(accountId: number, userId: number) {
+  const db = getDb();
+  const [account] = await db
+    .select()
+    .from(accounts)
+    .where(and(eq(accounts.id, accountId), eq(accounts.userId, userId)))
+    .limit(1);
+
+  if (!account) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Cuenta no encontrada" });
+  }
+  return account;
+}
+
+export const igRouter = createRouter({
+  workerStatus: adminQuery.query(async () => getWorkerStatus()),
+
+  startWorker: adminQuery.mutation(async () => {
     await iniciarWorkerGlobal();
     return { success: true, message: "Worker iniciado" };
   }),
 
-  stopWorker: publicQuery.mutation(async () => {
+  stopWorker: adminQuery.mutation(async () => {
     detenerWorkerGlobal();
     return { success: true, message: "Worker detenido" };
   }),
 
-  // ============================================================
-  // 3. DATOS DE CUENTA EN TIEMPO REAL
-  // ============================================================
-  getAccountStatus: publicQuery
-    .input(z.object({ accountId: z.number() }))
-    .query(async ({ input }) => {
+  getAccountStatus: authedQuery
+    .input(z.object({ accountId: accountIdSchema }))
+    .query(async ({ input, ctx }) => {
       const db = getDb();
-
-      const [account] = await db
-        .select()
-        .from(accounts)
-        .where(eq(accounts.id, input.accountId))
-        .limit(1);
-
-      if (!account) {
-        return { error: "Cuenta no encontrada" };
-      }
-
-      // Get latest trades
-      const latestTrades = await db
-        .select()
-        .from(trades)
+      const account = await requireOwnedAccount(input.accountId, ctx.user.id);
+      const latestTrades = await db.select().from(trades)
         .where(eq(trades.accountId, input.accountId))
-        .orderBy(desc(trades.createdAt))
-        .limit(10);
-
-      // Get open trades
-      const openTrades = latestTrades.filter(t => t.status === "open");
-
-      // Get latest protection logs
-      const logs = await db
-        .select()
-        .from(protectionLogs)
+        .orderBy(desc(trades.createdAt)).limit(10);
+      const openTrades = latestTrades.filter((trade) => trade.status === "open");
+      const logs = await db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId))
-        .orderBy(desc(protectionLogs.createdAt))
-        .limit(10);
-
-      // Get unread notifications
-      const notifs = await db
-        .select()
-        .from(notifications)
-        .where(
-          and(
-            eq(notifications.userId, account.userId),
-            eq(notifications.isRead, false)
-          )
-        )
-        .orderBy(desc(notifications.sentAt))
-        .limit(5);
+        .orderBy(desc(protectionLogs.createdAt)).limit(10);
+      const notifs = await db.select().from(notifications)
+        .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)))
+        .orderBy(desc(notifications.sentAt)).limit(5);
 
       return {
         account: {
@@ -87,7 +65,7 @@ export const igRouter = createRouter({
           brokerType: account.brokerName,
           accountNumber: account.accountNumber,
           currentBalance: account.currentBalance,
-          currentEquity: account.currentBalance, // No hay currentEquity, usar balance
+          currentEquity: account.currentBalance,
           dailyLimit: account.dailyLimitPct,
           weeklyLimit: account.weeklyLimitPct,
           monthlyLimit: account.monthlyLimitPct,
@@ -102,106 +80,65 @@ export const igRouter = createRouter({
       };
     }),
 
-  // ============================================================
-  // 4. HISTORIAL COMPLETO DE PROTECCIÓN
-  // ============================================================
-  getProtectionHistory: publicQuery
-    .input(z.object({
-      accountId: z.number(),
-      limit: z.number().default(50),
-    }))
-    .query(async ({ input }) => {
+  getProtectionHistory: authedQuery
+    .input(z.object({ accountId: accountIdSchema, limit: boundedLimit(50, 100) }))
+    .query(async ({ input, ctx }) => {
+      await requireOwnedAccount(input.accountId, ctx.user.id);
       const db = getDb();
-
-      const logs = await db
-        .select()
-        .from(protectionLogs)
+      return db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId))
-        .orderBy(desc(protectionLogs.createdAt))
-        .limit(input.limit);
-
-      return logs;
+        .orderBy(desc(protectionLogs.createdAt)).limit(input.limit);
     }),
 
-  // ============================================================
-  // 5. NOTIFICACIONES
-  // ============================================================
-  getNotifications: publicQuery
+  // Legacy userId is accepted but ignored; session identity is authoritative.
+  getNotifications: authedQuery
     .input(z.object({
-      userId: z.number(),
-      limit: z.number().default(20),
+      userId: z.number().int().positive().optional(),
+      limit: boundedLimit(20, 100),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = getDb();
-
-      const notifs = await db
-        .select()
-        .from(notifications)
-        .where(eq(notifications.userId, input.userId))
-        .orderBy(desc(notifications.sentAt))
-        .limit(input.limit);
-
-      return notifs;
+      return db.select().from(notifications)
+        .where(eq(notifications.userId, ctx.user.id))
+        .orderBy(desc(notifications.sentAt)).limit(input.limit);
     }),
 
-  markNotificationRead: publicQuery
-    .input(z.object({ notificationId: z.number() }))
-    .mutation(async ({ input }) => {
+  markNotificationRead: authedQuery
+    .input(z.object({ notificationId: z.number().int().positive() }))
+    .mutation(async ({ input, ctx }) => {
       const db = getDb();
-
-      await db
-        .update(notifications)
-        .set({ isRead: true })
-        .where(eq(notifications.id, input.notificationId));
-
+      await db.update(notifications).set({ isRead: true })
+        .where(and(
+          eq(notifications.id, input.notificationId),
+          eq(notifications.userId, ctx.user.id),
+        ));
       return { success: true };
     }),
 
-  // ============================================================
-  // 6. LISTAR CUENTAS DEL USUARIO
-  // ============================================================
-  getUserAccounts: publicQuery
-    .input(z.object({ userId: z.number() }))
-    .query(async ({ input }) => {
+  // Legacy userId is accepted but ignored to preserve client compatibility.
+  getUserAccounts: authedQuery
+    .input(z.object({ userId: z.number().int().positive().optional() }).optional())
+    .query(async ({ ctx }) => {
       const db = getDb();
-
-      const userAccounts = await db
-        .select()
-        .from(accounts)
-        .where(eq(accounts.userId, input.userId))
+      return db.select().from(accounts)
+        .where(eq(accounts.userId, ctx.user.id))
         .orderBy(desc(accounts.createdAt));
-
-      return userAccounts;
     }),
 
-  // ============================================================
-  // 7. ESTADÍSTICAS DE SESIÓN
-  // ============================================================
-  getSessionStats: publicQuery
-    .input(z.object({ accountId: z.number() }))
-    .query(async ({ input }) => {
+  getSessionStats: authedQuery
+    .input(z.object({ accountId: accountIdSchema }))
+    .query(async ({ input, ctx }) => {
+      await requireOwnedAccount(input.accountId, ctx.user.id);
       const db = getDb();
-
-      // Total trades
-      const allTrades = await db
-        .select()
-        .from(trades)
+      const allTrades = await db.select().from(trades)
         .where(eq(trades.accountId, input.accountId));
-
-      const openTrades = allTrades.filter(t => t.status === "open");
-      const closedTrades = allTrades.filter(t => t.status === "closed");
-
-      // Total P&L
-      const totalPnL = closedTrades.reduce((sum, t) => sum + Number(t.profitLoss || 0), 0);
-
-      // Protection triggers
-      const logs = await db
-        .select()
-        .from(protectionLogs)
+      const openTrades = allTrades.filter((trade) => trade.status === "open");
+      const closedTrades = allTrades.filter((trade) => trade.status === "closed");
+      const totalPnL = closedTrades.reduce((sum, trade) => sum + Number(trade.profitLoss || 0), 0);
+      const logs = await db.select().from(protectionLogs)
         .where(eq(protectionLogs.accountId, input.accountId));
-
-      const dailyTriggers = logs.filter(l => l.triggerType === "daily_limit").length;
-      const trailingTriggers = logs.filter(l => l.triggerType === "trailing_profit").length;
+      const dailyTriggers = logs.filter((log) => log.triggerType === "daily_limit").length;
+      const trailingTriggers = logs.filter((log) => log.triggerType === "trailing_profit").length;
 
       return {
         totalTrades: allTrades.length,
@@ -209,7 +146,7 @@ export const igRouter = createRouter({
         closedTrades: closedTrades.length,
         totalPnL,
         winRate: closedTrades.length > 0
-          ? (closedTrades.filter(t => Number(t.profitLoss) > 0).length / closedTrades.length * 100).toFixed(1)
+          ? (closedTrades.filter((trade) => Number(trade.profitLoss) > 0).length / closedTrades.length * 100).toFixed(1)
           : 0,
         dailyTriggers,
         trailingTriggers,
