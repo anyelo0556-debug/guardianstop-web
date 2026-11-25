@@ -10,6 +10,11 @@ import { eq, and } from "drizzle-orm";
 import { decryptSecret } from "../lib/credential-vault";
 import { isIGAccountPollingAllowed } from "./ig-worker-safety";
 import {
+  ensurePendingCloseIntent,
+  getPendingCloseIntent,
+  recordCloseIntentEvent,
+} from "./risk-execution-intent-store";
+import {
   igAuthenticate,
   igGetFullData,
   igCloseAllPositions,
@@ -56,7 +61,6 @@ const activeSessions = new Map<number, IGSessionData>();
 const isRunning = new Map<number, boolean>(); // Evita ejecuciones paralelas
 const peakPnL = new Map<number, number>(); // Pico de P&L por cuenta
 const initialBalance = new Map<number, number>(); // Balance inicial por sesión
-const pendingCloseReason = new Map<number, string>(); // Reintento mientras el worker siga activo
 const liveAccountBlockedNotice = new Set<number>();
 
 // ============================================================
@@ -258,7 +262,14 @@ async function cerrarYVerificar(
   igSession: IGSession,
   positions: IGPosition[],
   reason: string,
+  intentKey?: string,
 ): Promise<boolean> {
+  // Persist the intent before issuing any broker command. A restart can resume
+  // from this row instead of losing the close reason in process memory.
+  const intent = intentKey
+    ? { idempotencyKey: intentKey }
+    : await ensurePendingCloseIntent(account.accountId, reason);
+  const activeIntentKey = intent.idempotencyKey;
   const commandResult = await igCloseAllPositions(igSession, positions);
   let remainingPositions: IGPosition[] | null = null;
 
@@ -273,7 +284,9 @@ async function cerrarYVerificar(
   const db = getDb();
 
   if (confirmed) {
-    pendingCloseReason.delete(account.accountId);
+    await recordCloseIntentEvent(activeIntentKey, {
+      type: "BROKER_FLAT_CONFIRMED",
+    });
     closeUnconfirmedAlertAt.delete(account.accountId);
     await db.insert(notifications).values({
       userId: account.userId,
@@ -285,7 +298,12 @@ async function cerrarYVerificar(
     return true;
   }
 
-  pendingCloseReason.set(account.accountId, reason);
+  await recordCloseIntentEvent(activeIntentKey, {
+    type: "ATTEMPT_UNCONFIRMED",
+    errorCode: remainingPositions === null
+      ? "POSITION_QUERY_FAILED"
+      : "POSITIONS_REMAINING",
+  });
   const now = Date.now();
   const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
   if (now - lastAlertAt >= 60_000) {
@@ -319,11 +337,10 @@ async function ejecutarProteccion(
 ): Promise<void> {
   const db = getDb();
 
-  // Keep retrying an unconfirmed close before evaluating any new risk condition.
-  // This is an in-process safeguard; durable recovery after a worker restart still
-  // requires the persistent governance/outbox integration.
-  const pendingReason = pendingCloseReason.get(account.accountId);
-  if (pendingReason) {
+  // Recover a durable close intent before evaluating new risk conditions.
+  // This survives process restarts; the broker remains the source of truth.
+  const pendingIntent = await getPendingCloseIntent(account.accountId);
+  if (pendingIntent) {
     if (data.posicionesAbiertas > 0) {
       const pendingPositions: IGPosition[] = data.trades.map((trade: any) => ({
         dealId: trade.brokerTradeId,
@@ -335,17 +352,25 @@ async function ejecutarProteccion(
         profit: trade.profitLoss,
         profitPct: 0,
       }));
-      await cerrarYVerificar(account, igSession, pendingPositions, pendingReason);
+      await cerrarYVerificar(
+        account,
+        igSession,
+        pendingPositions,
+        pendingIntent.reason,
+        pendingIntent.idempotencyKey,
+      );
       return;
     }
 
-    pendingCloseReason.delete(account.accountId);
+    await recordCloseIntentEvent(pendingIntent.idempotencyKey, {
+      type: "BROKER_FLAT_CONFIRMED",
+    });
     closeUnconfirmedAlertAt.delete(account.accountId);
     await db.insert(notifications).values({
       userId: account.userId,
       type: "limit_breach",
       title: "Cierre confirmado por IG",
-      message: `La consulta de posiciones de IG confirmó que no quedan operaciones abiertas después de ${pendingReason}.`,
+      message: `La consulta de posiciones de IG confirmó que no quedan operaciones abiertas después de ${pendingIntent.reason}.`,
     });
     console.log(`[PROTECTION] Account ${account.accountId}: pending close confirmed by fresh polling snapshot`);
     return;
