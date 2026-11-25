@@ -5,8 +5,9 @@
  */
 
 import { getDb } from "../queries/connection";
-import { accounts, protectionLogs, notifications } from "@db/schema";
+import { accounts, accountCredentials, protectionLogs, notifications } from "@db/schema";
 import { eq, and } from "drizzle-orm";
+import { decryptSecret } from "../lib/credential-vault";
 import {
   igAuthenticate,
   igGetFullData,
@@ -60,8 +61,22 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
   const db = getDb();
 
   const results = await db
-    .select()
+    .select({
+      accountId: accounts.id,
+      userId: accounts.userId,
+      accountNumber: accounts.accountNumber,
+      accountType: accounts.accountType,
+      dailyLimitPct: accounts.dailyLimitPct,
+      weeklyLimitPct: accounts.weeklyLimitPct,
+      monthlyLimitPct: accounts.monthlyLimitPct,
+      trailingEnabled: accounts.trailingEnabled,
+      trailingProtectionPct: accounts.trailingProtectionPct,
+      igApiKey: accountCredentials.igApiKey,
+      igIdentifier: accountCredentials.igIdentifier,
+      igPassword: accountCredentials.igPassword,
+    })
     .from(accounts)
+    .leftJoin(accountCredentials, eq(accountCredentials.accountId, accounts.id))
     .where(
       and(
         eq(accounts.isActive, true),
@@ -69,12 +84,28 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
       )
     );
 
+  const decryptForWorker = (
+    value: string | null,
+    accountId: number,
+    field: string,
+  ): string => {
+    if (!value) return "";
+    try {
+      return decryptSecret(value);
+    } catch {
+      // Never log credential material. The account is skipped until the key or
+      // stored ciphertext is corrected.
+      console.error(`[WORKER] Account ${accountId}: unable to decrypt ${field}; skipping authentication.`);
+      return "";
+    }
+  };
+
   return results.map(a => ({
-    accountId: a.id,
+    accountId: a.accountId,
     userId: a.userId,
-    apiKey: process.env.IG_API_KEY || "",
-    username: a.accountNumber || "", // Store IG username here or add a field
-    password: "", // You'll need to store this securely or prompt user
+    apiKey: decryptForWorker(a.igApiKey, a.accountId, "IG API key"),
+    username: a.igIdentifier || "",
+    password: decryptForWorker(a.igPassword, a.accountId, "IG password"),
     accountNumber: a.accountNumber || "",
     isDemo: a.accountType === "demo",
     dailyLimit: Number(a.dailyLimitPct || 1),
@@ -99,7 +130,7 @@ async function asegurarSesion(account: WorkerAccount): Promise<IGSessionData | n
 
   // Si no tenemos password, no podemos autenticar
   // En producción, esto vendría de la DB o de un token OAuth
-  if (!account.username || !account.password) {
+  if (!account.apiKey || !account.username || !account.password) {
     console.log(`[WORKER] Account ${account.accountId}: No credentials stored. Skipping.`);
     return null;
   }
