@@ -12,12 +12,25 @@ Probar el backend, el cifrado y los conectores sin utilizar cuentas reales, cred
 - No activar cierres de posiciones reales. Las pruebas de ejecución deben usar simuladores o cuentas demo individuales autorizadas.
 - No registrar tokens, contraseñas, códigos OAuth, cabeceras Authorization ni URLs completas de intercambio OAuth.
 
+## Bloqueo del worker IG en cuentas live
+
+El worker IG heredado no debe operar cuentas live mientras no esté conectado al evaluador REAL/PROP normalizado y a la gobernanza persistente. El adaptador actual solo calcula P&L flotante de posiciones abiertas; sus campos diarios, semanales y mensuales son aproximaciones y no sustituyen un ledger histórico verificado.
+
+Por seguridad, las cuentas demo siguen disponibles para pruebas aisladas. Las cuentas live quedan excluidas del polling salvo que se configuren **ambas** variables de entorno después de completar y validar la integración:
+
+- `GUARDIAN_ALLOW_LIVE_IG_WORKER=true`
+- `GUARDIAN_LIVE_RISK_GOVERNANCE_READY=true`
+
+Mantener ambas variables en `false` o sin configurar en desarrollo, CI y entornos de prueba. No habilitarlas solo para “probar conexión”: el segundo indicador es una confirmación operativa que únicamente debe activarse cuando existan persistencia de estados, recuperación de cierres pendientes y validación integral en demo.
+
 ## Variables locales
 
 Copiar `.env.test.example` a un archivo local ignorado por Git (por ejemplo `.env.test.local`) y completar únicamente valores de prueba. No guardar secretos en el repositorio.
 
 - `NODE_ENV=test`
 - `GUARDIAN_ENVIRONMENT=test`
+- `GUARDIAN_ALLOW_LIVE_IG_WORKER=false`
+- `GUARDIAN_LIVE_RISK_GOVERNANCE_READY=false`
 - `DATABASE_URL`: base de datos desechable de pruebas, nunca producción.
 - `GUARDIAN_TOKEN_ENCRYPTION_KEY`: clave aleatoria de 32 bytes codificada en Base64, exclusiva para pruebas.
 - `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_REDIRECT_URI`: dejar sin configurar hasta que exista una app de pruebas registrada y un callback seguro.
