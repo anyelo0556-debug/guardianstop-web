@@ -1,6 +1,22 @@
 # Guardian Stop Dual Risk Engine — Real + Prop Accounts
 
-Status: architecture decision / implementation pending.
+Status: Phase A partially implemented in the development branch; end-to-end enforcement is not certified.
+
+Implemented pure components:
+- `api/risk/prop-cash-loss.ts`: fixed USD $50–$300 PROP cash-loss calculator using integer cents.
+- `api/risk/normalized-risk-evaluator.ts`: deterministic REAL period limits and separate PROP Guardian Stop / verified-firm capacity evaluation; stale telemetry and unverified firm rules fail closed.
+- `api/risk/governance-state.ts`: deterministic discipline, telemetry, close-confirmation and 12-hour lockout transitions.
+- `api/lib/credential-vault.ts`: shared AES-256-GCM credential encryption/decryption, with legacy plaintext read compatibility during migration.
+- `api/services/IGPollingWorker.ts`: loads per-account encrypted IG credentials and re-reads broker positions after close requests; unconfirmed closes are alerted and retried while the worker process remains running.
+
+Not yet integrated or certified:
+- The normalized evaluator and governance state machine are not yet wired into the persistent account/risk request path or TiDB ledger.
+- The legacy `api/services/RiskEngine.ts` still contains simulated broker observations and a close routine whose broker call is a TODO; it must not be treated as a live execution adapter.
+- The IG worker is started through an administrator endpoint, not automatically at server boot. It has not been exercised against an IG demo account in this development run.
+- The current IG worker still needs broker-history reconciliation, a timezone-aware daily baseline, durable close-pending recovery across process restarts, and end-to-end tests.
+- No MT5 Companion, TradingView execution gateway, or Prop Firm ruleset catalogue is certified.
+
+All changes above are development-branch code only. No production database migration or deployment has been performed.
 Scope: one risk authority for broker-funded accounts and proprietary trading firm accounts.
 Safety: this document does not authorize production changes, migrations, live trading, or automated actions against third-party accounts.
 
