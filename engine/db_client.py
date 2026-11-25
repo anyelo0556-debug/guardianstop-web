@@ -89,7 +89,7 @@ def get_active_accounts() -> List[Dict]:
                     a.isActive, ac.igApiKey, ac.igIdentifier, ac.igPassword, ac.derivApiToken
                 FROM accounts a
                 INNER JOIN account_credentials ac ON ac.accountId = a.id
-                WHERE a.isActive = 1
+                WHERE a.isActive = 1 AND a.accountType = 'demo'
             """)
             rows = cur.fetchall()
     for row in rows:
