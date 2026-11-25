@@ -2,30 +2,25 @@
  * Broker credentials are account-owned and encrypted before persistence.
  * Secrets are never returned to the browser after being saved.
  */
-import { createCipheriv, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { createRouter, authedQuery } from "./middleware";
 import { getDb } from "./queries/connection";
 import { accounts, accountCredentials } from "@db/schema";
+import { encryptSecret } from "./lib/credential-vault";
 import { and, eq } from "drizzle-orm";
 
 const secretSchema = z.string().min(1).max(2048).optional();
 
-function encryptSecret(value: string): string {
-  const rawKey = process.env.CREDENTIALS_ENCRYPTION_KEY ?? "";
-  if (!/^[0-9a-fA-F]{64}$/.test(rawKey)) {
+function encryptSecretForApi(value: string): string {
+  try {
+    return encryptSecret(value);
+  } catch {
     throw new TRPCError({
       code: "INTERNAL_SERVER_ERROR",
       message: "Broker credential encryption is not configured",
     });
   }
-  const key = Buffer.from(rawKey, "hex");
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `enc:v1:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
 }
 
 export const credentialsRouter = createRouter({
@@ -55,10 +50,10 @@ export const credentialsRouter = createRouter({
       }
 
       const values: { igApiKey?: string; igIdentifier?: string; igPassword?: string; derivApiToken?: string } = {};
-      if (input.igApiKey !== undefined) values.igApiKey = encryptSecret(input.igApiKey);
+      if (input.igApiKey !== undefined) values.igApiKey = encryptSecretForApi(input.igApiKey);
       if (input.igIdentifier !== undefined) values.igIdentifier = input.igIdentifier;
-      if (input.igPassword !== undefined) values.igPassword = encryptSecret(input.igPassword);
-      if (input.derivApiToken !== undefined) values.derivApiToken = encryptSecret(input.derivApiToken);
+      if (input.igPassword !== undefined) values.igPassword = encryptSecretForApi(input.igPassword);
+      if (input.derivApiToken !== undefined) values.derivApiToken = encryptSecretForApi(input.derivApiToken);
 
       const existing = await db.select({ id: accountCredentials.id })
         .from(accountCredentials)
