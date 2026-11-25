@@ -14,6 +14,7 @@ import {
   getPendingCloseIntent,
   claimPendingCloseIntent,
   recordCloseIntentEvent,
+  renewPendingCloseIntentLease,
 } from "./risk-execution-intent-store";
 import {
   igAuthenticate,
@@ -31,6 +32,7 @@ import {
 
 const POLL_INTERVAL_MS = 3000; // 3 segundos
 const SESSION_TTL_MS = 1000 * 60 * 10; // 10 minutos (re-auth cada 10 min)
+const CLOSE_INTENT_LEASE_HEARTBEAT_MS = 30_000;
 
 interface WorkerAccount {
   accountId: number;
@@ -277,73 +279,110 @@ async function cerrarYVerificar(
     return false;
   }
   const leaseOwner = claim.leaseOwner;
-  let commandResult: { closed: number; failed: number; errors: string[] } = {
-    closed: 0,
-    failed: positions.length,
-    errors: [],
+  let leaseLost = false;
+  let renewalInFlight: Promise<void> | null = null;
+  const heartbeat = setInterval(() => {
+    if (leaseLost || renewalInFlight) return;
+    renewalInFlight = renewPendingCloseIntentLease(activeIntentKey, leaseOwner)
+      .then((renewed) => {
+        if (!renewed) {
+          leaseLost = true;
+          console.error(`[PROTECTION] Account ${account.accountId}: close-intent lease expired or was taken over.`);
+        }
+      })
+      .catch((error) => {
+        leaseLost = true;
+        console.error(`[PROTECTION] Account ${account.accountId}: close-intent lease renewal failed.`, error);
+      })
+      .finally(() => {
+        renewalInFlight = null;
+      });
+  }, CLOSE_INTENT_LEASE_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
+  const stopHeartbeat = async (): Promise<void> => {
+    clearInterval(heartbeat);
+    if (renewalInFlight) await renewalInFlight;
   };
-  let commandFailed = false;
-  try {
-    commandResult = await igCloseAllPositions(igSession, positions);
-  } catch (error) {
-    commandFailed = true;
-    console.error(`[PROTECTION] Account ${account.accountId}: IG close command failed for ${reason}.`, error);
-  }
-  let remainingPositions: IGPosition[] | null = null;
 
   try {
-    remainingPositions = await igGetPositions(igSession);
-  } catch {
-    // An unavailable verification endpoint is an unconfirmed close, never success.
-    console.error(`[PROTECTION] Account ${account.accountId}: unable to verify IG close after ${reason}`);
-  }
+    let commandResult: { closed: number; failed: number; errors: string[] } = {
+      closed: 0,
+      failed: positions.length,
+      errors: [],
+    };
+    let commandFailed = false;
+    try {
+      commandResult = await igCloseAllPositions(igSession, positions);
+    } catch (error) {
+      commandFailed = true;
+      console.error(`[PROTECTION] Account ${account.accountId}: IG close command failed for ${reason}.`, error);
+    }
+    let remainingPositions: IGPosition[] | null = null;
 
-  const confirmed = remainingPositions !== null && remainingPositions.length === 0;
-  const db = getDb();
+    try {
+      remainingPositions = await igGetPositions(igSession);
+    } catch {
+      // An unavailable verification endpoint is an unconfirmed close, never success.
+      console.error(`[PROTECTION] Account ${account.accountId}: unable to verify IG close after ${reason}`);
+    }
 
-  if (confirmed) {
+    await stopHeartbeat();
+    if (leaseLost) {
+      // Do not write an event from a worker that can no longer prove ownership.
+      // The durable pending intent will be reconciled by the next lease holder.
+      return false;
+    }
+
+    const confirmed = remainingPositions !== null && remainingPositions.length === 0;
+    const db = getDb();
+
+    if (confirmed) {
+      await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
+        type: "BROKER_FLAT_CONFIRMED",
+      });
+      closeUnconfirmedAlertAt.delete(account.accountId);
+      await db.insert(notifications).values({
+        userId: account.userId,
+        type: "limit_breach",
+        title: "Cierre confirmado por IG",
+        message: `IG ya no reporta posiciones abiertas después de la protección ${reason}. La confirmación se obtuvo consultando nuevamente la cuenta.`,
+      });
+      console.log(`[PROTECTION] Account ${account.accountId}: CLOSE_CONFIRMED after ${reason}`);
+      return true;
+    }
+
     await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
-      type: "BROKER_FLAT_CONFIRMED",
+      type: "ATTEMPT_UNCONFIRMED",
+      errorCode: remainingPositions === null
+        ? "POSITION_QUERY_FAILED"
+        : commandFailed
+          ? "CLOSE_COMMAND_FAILED"
+          : "POSITIONS_REMAINING",
     });
-    closeUnconfirmedAlertAt.delete(account.accountId);
-    await db.insert(notifications).values({
-      userId: account.userId,
-      type: "limit_breach",
-      title: "Cierre confirmado por IG",
-      message: `IG ya no reporta posiciones abiertas después de la protección ${reason}. La confirmación se obtuvo consultando nuevamente la cuenta.`,
-    });
-    console.log(`[PROTECTION] Account ${account.accountId}: CLOSE_CONFIRMED after ${reason}`);
-    return true;
-  }
+    const now = Date.now();
+    const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
+    if (now - lastAlertAt >= 60_000) {
+      const remainingCount = remainingPositions?.length;
+      const verification = remainingCount === undefined
+        ? "No fue posible consultar nuevamente las posiciones."
+        : `IG todavía reporta ${remainingCount} posiciones abiertas.`;
+      await db.insert(notifications).values({
+        userId: account.userId,
+        type: "limit_breach",
+        title: "Cierre no confirmado",
+        message: `Guardian Stop solicitó el cierre por ${reason}, pero no puede confirmar que la cuenta esté plana. ${verification} Solicitudes aceptadas por IG: ${commandResult.closed}; solicitudes fallidas: ${commandResult.failed}. No abras nuevas operaciones. El worker continuará verificando mientras permanezca conectado.`,
+      });
+      closeUnconfirmedAlertAt.set(account.accountId, now);
+    }
 
-  await recordCloseIntentEvent(activeIntentKey, leaseOwner, {
-    type: "ATTEMPT_UNCONFIRMED",
-    errorCode: remainingPositions === null
-      ? "POSITION_QUERY_FAILED"
-      : commandFailed
-        ? "CLOSE_COMMAND_FAILED"
-        : "POSITIONS_REMAINING",
-  });
-  const now = Date.now();
-  const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
-  if (now - lastAlertAt >= 60_000) {
-    const remainingCount = remainingPositions?.length;
-    const verification = remainingCount === undefined
-      ? "No fue posible consultar nuevamente las posiciones."
-      : `IG todavía reporta ${remainingCount} posiciones abiertas.`;
-    await db.insert(notifications).values({
-      userId: account.userId,
-      type: "limit_breach",
-      title: "Cierre no confirmado",
-      message: `Guardian Stop solicitó el cierre por ${reason}, pero no puede confirmar que la cuenta esté plana. ${verification} Solicitudes aceptadas por IG: ${commandResult.closed}; solicitudes fallidas: ${commandResult.failed}. No abras nuevas operaciones. El worker continuará verificando mientras permanezca conectado.`,
-    });
-    closeUnconfirmedAlertAt.set(account.accountId, now);
+    console.error(
+      `[PROTECTION] Account ${account.accountId}: CLOSE_UNCONFIRMED after ${reason}; accepted=${commandResult.closed}; failed=${commandResult.failed}; remaining=${remainingPositions?.length ?? "unknown"}`,
+    );
+    return false;
+  } finally {
+    await stopHeartbeat();
   }
-
-  console.error(
-    `[PROTECTION] Account ${account.accountId}: CLOSE_UNCONFIRMED after ${reason}; accepted=${commandResult.closed}; failed=${commandResult.failed}; remaining=${remainingPositions?.length ?? "unknown"}`,
-  );
-  return false;
 }
 
 // ============================================================
