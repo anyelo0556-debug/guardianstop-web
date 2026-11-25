@@ -8,6 +8,7 @@ import { getDb } from "../queries/connection";
 import { accounts, accountCredentials, protectionLogs, notifications } from "@db/schema";
 import { eq, and } from "drizzle-orm";
 import { decryptSecret } from "../lib/credential-vault";
+import { isIGAccountPollingAllowed } from "./ig-worker-safety";
 import {
   igAuthenticate,
   igGetFullData,
@@ -56,6 +57,7 @@ const isRunning = new Map<number, boolean>(); // Evita ejecuciones paralelas
 const peakPnL = new Map<number, number>(); // Pico de P&L por cuenta
 const initialBalance = new Map<number, number>(); // Balance inicial por sesión
 const pendingCloseReason = new Map<number, string>(); // Reintento mientras el worker siga activo
+const liveAccountBlockedNotice = new Set<number>();
 
 // ============================================================
 // 1. OBTENER CUENTAS ACTIVAS
@@ -88,6 +90,22 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
       )
     );
 
+  const pollableResults = results.filter((account) => {
+    const isDemo = account.accountType === "demo";
+    if (isIGAccountPollingAllowed(isDemo, process.env)) {
+      liveAccountBlockedNotice.delete(account.accountId);
+      return true;
+    }
+
+    if (!liveAccountBlockedNotice.has(account.accountId)) {
+      console.error(
+        `[WORKER] Account ${account.accountId}: live polling blocked. The IG adapter currently exposes open-position P&L only; enablement requires the normalized risk evaluator and persistent governance to be integrated and validated first.`,
+      );
+      liveAccountBlockedNotice.add(account.accountId);
+    }
+    return false;
+  });
+
   const decryptForWorker = (
     value: string | null,
     accountId: number,
@@ -104,7 +122,7 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
     }
   };
 
-  return results.map(a => ({
+  return pollableResults.map(a => ({
     accountId: a.accountId,
     userId: a.userId,
     apiKey: decryptForWorker(a.igApiKey, a.accountId, "IG API key"),
@@ -114,7 +132,7 @@ async function obtenerCuentasActivas(): Promise<WorkerAccount[]> {
     isDemo: a.accountType === "demo",
     dailyLimit: Number(a.dailyLimitPct || 1),
     weeklyLimit: Number(a.weeklyLimitPct || 10),
-    monthlyLimit: Number(a.monthlyLimitPct || 30),
+    monthlyLimit: Number(a.monthlyLimitPct || 20),
     trailingEnabled: a.trailingEnabled ?? true,
     trailingProtectPct: Number(a.trailingProtectionPct || 30),
   }));
@@ -486,10 +504,6 @@ export function detenerWorkerGlobal(): void {
     console.log("[WORKER] Stopped");
   }
 }
-
-// ============================================================
-// 6. ESTADO DEL WORKER (para API)
-// ============================================================
 
 export function getWorkerStatus(): {
   running: boolean;
