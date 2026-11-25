@@ -146,14 +146,17 @@ export function transitionRiskGovernance(
         : current;
 
     case "UNLOCK_AFTER_LOCKOUT": {
+      const validServerTime = Number.isSafeInteger(event.nowMs) && event.nowMs >= 0;
       const lockoutElapsed =
-        current.lockoutUntilMs !== null && event.nowMs >= current.lockoutUntilMs;
+        validServerTime &&
+        current.lockoutUntilMs !== null &&
+        event.nowMs >= current.lockoutUntilMs;
       const safeToResume =
         current.telemetry === "VERIFIED" &&
         current.execution !== "CLOSE_PENDING" &&
         current.execution !== "CLOSE_UNCONFIRMED" &&
-        event.riskClear &&
-        event.termsAccepted;
+        event.riskClear === true &&
+        event.termsAccepted === true;
       if (current.discipline !== "LOCKED" || !lockoutElapsed || !safeToResume) {
         return current;
       }
@@ -168,8 +171,10 @@ export function transitionRiskGovernance(
     case "SET_ACCOUNT_MODE":
       if (
         current.discipline === "LOCKED" ||
+        current.execution === "CLOSE_PENDING" ||
+        current.execution === "CLOSE_UNCONFIRMED" ||
         (current.telemetry !== "CONNECTED" && current.telemetry !== "VERIFIED") ||
-        !event.termsAccepted ||
+        event.termsAccepted !== true ||
         current.accountMode === event.mode
       ) {
         return current;
