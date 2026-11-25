@@ -60,10 +60,13 @@ def calculate_trailing_stop(total_pnl, peak_pnl, trailing_enabled, trailing_acti
 
 def check_protection(initial_balance, current_balance, total_pnl, peak_pnl, positions_count,
                      daily_limit_pct, weekly_limit_pct, monthly_limit_pct, trailing_enabled,
-                     trailing_activation_pct, trailing_protection_pct, closed_trades, floating_pnl=0.0):
-    # Realized loss breaches must lock the account even with zero open positions.
+                     trailing_activation_pct, trailing_protection_pct, closed_trades, floating_pnl=0.0,
+                     now=None):
+    # Use the same evaluation instant as the ledger calculation. This keeps historical
+    # simulations deterministic and prevents a breach from disappearing when tests
+    # (or replayed events) evaluate a past trading day.
     limits = calculate_limits(initial_balance, daily_limit_pct, weekly_limit_pct, monthly_limit_pct,
-                              closed_trades, floating_pnl=floating_pnl)
+                              closed_trades, floating_pnl=floating_pnl, now=now)
     if limits["daily_limit"] and limits["daily_loss"] >= limits["daily_limit"]: return "daily_limit"
     if limits["weekly_limit"] and limits["weekly_loss"] >= limits["weekly_limit"]: return "weekly_limit"
     if limits["monthly_limit"] and limits["monthly_loss"] >= limits["monthly_limit"]: return "monthly_limit"
