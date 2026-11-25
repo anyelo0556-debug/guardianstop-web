@@ -55,6 +55,7 @@ const activeSessions = new Map<number, IGSessionData>();
 const isRunning = new Map<number, boolean>(); // Evita ejecuciones paralelas
 const peakPnL = new Map<number, number>(); // Pico de P&L por cuenta
 const initialBalance = new Map<number, number>(); // Balance inicial por sesión
+const pendingCloseReason = new Map<number, string>(); // Reintento mientras el worker siga activo
 
 // ============================================================
 // 1. OBTENER CUENTAS ACTIVAS
@@ -254,6 +255,7 @@ async function cerrarYVerificar(
   const db = getDb();
 
   if (confirmed) {
+    pendingCloseReason.delete(account.accountId);
     closeUnconfirmedAlertAt.delete(account.accountId);
     await db.insert(notifications).values({
       userId: account.userId,
@@ -265,6 +267,7 @@ async function cerrarYVerificar(
     return true;
   }
 
+  pendingCloseReason.set(account.accountId, reason);
   const now = Date.now();
   const lastAlertAt = closeUnconfirmedAlertAt.get(account.accountId) ?? 0;
   if (now - lastAlertAt >= 60_000) {
@@ -297,6 +300,39 @@ async function ejecutarProteccion(
   igSession: any
 ): Promise<void> {
   const db = getDb();
+
+  // Keep retrying an unconfirmed close before evaluating any new risk condition.
+  // This is an in-process safeguard; durable recovery after a worker restart still
+  // requires the persistent governance/outbox integration.
+  const pendingReason = pendingCloseReason.get(account.accountId);
+  if (pendingReason) {
+    if (data.posicionesAbiertas > 0) {
+      const pendingPositions: IGPosition[] = data.trades.map((trade: any) => ({
+        dealId: trade.brokerTradeId,
+        symbol: trade.symbol,
+        direction: trade.direction.toUpperCase(),
+        size: trade.lotSize,
+        openPrice: trade.entryPrice,
+        currentPrice: trade.exitPrice || trade.entryPrice,
+        profit: trade.profitLoss,
+        profitPct: 0,
+      }));
+      await cerrarYVerificar(account, igSession, pendingPositions, pendingReason);
+      return;
+    }
+
+    pendingCloseReason.delete(account.accountId);
+    closeUnconfirmedAlertAt.delete(account.accountId);
+    await db.insert(notifications).values({
+      userId: account.userId,
+      type: "limit_breach",
+      title: "Cierre confirmado por IG",
+      message: `La consulta de posiciones de IG confirmó que no quedan operaciones abiertas después de ${pendingReason}.`,
+    });
+    console.log(`[PROTECTION] Account ${account.accountId}: pending close confirmed by fresh polling snapshot`);
+    return;
+  }
+
   const currentPnL = data.trades.reduce((s: number, t: any) => s + (t.profitLoss || 0), 0);
   const balanceInicial = initialBalance.get(account.accountId) || data.balance;
   const effectiveBalance = data.balance + currentPnL;
