@@ -9,6 +9,7 @@ import {
   int,
   decimal,
   boolean,
+  index,
 } from "drizzle-orm/mysql-core";
 
 // ─── USERS (managed by auth system) ───────────────────────────────
@@ -72,6 +73,29 @@ export const accountCredentials = mysqlTable("account_credentials", {
 
 export type AccountCredential = typeof accountCredentials.$inferSelect;
 export type InsertAccountCredential = typeof accountCredentials.$inferInsert;
+
+// ─── DURABLE BROKER CLOSE INTENTS ─────────────────────────────────
+export const riskExecutionIntents = mysqlTable(
+  "risk_execution_intents",
+  {
+    idempotencyKey: varchar("idempotencyKey", { length: 191 }).primaryKey(),
+    accountId: bigint("accountId", { mode: "number", unsigned: true })
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    reason: varchar("reason", { length: 64 }).notNull(),
+    status: mysqlEnum("status", ["pending", "confirmed"]).default("pending").notNull(),
+    attemptCount: int("attemptCount").default(0).notNull(),
+    lastAttemptAt: timestamp("lastAttemptAt"),
+    confirmedAt: timestamp("confirmedAt"),
+    lastErrorCode: varchar("lastErrorCode", { length: 64 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+  (table) => ({
+    accountStatusCreatedIndex: index("risk_execution_intents_account_status_created_idx")
+      .on(table.accountId, table.status, table.createdAt),
+  }),
+);
 
 // ─── SUBSCRIPTIONS ────────────────────────────────────────────────
 export const subscriptions = mysqlTable("subscriptions", {
