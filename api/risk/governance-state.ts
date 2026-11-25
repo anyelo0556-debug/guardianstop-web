@@ -150,6 +150,7 @@ export function transitionRiskGovernance(
         current.lockoutUntilMs !== null && event.nowMs >= current.lockoutUntilMs;
       const safeToResume =
         current.telemetry === "VERIFIED" &&
+        current.execution !== "CLOSE_PENDING" &&
         current.execution !== "CLOSE_UNCONFIRMED" &&
         event.riskClear &&
         event.termsAccepted;
@@ -167,6 +168,7 @@ export function transitionRiskGovernance(
     case "SET_ACCOUNT_MODE":
       if (
         current.discipline === "LOCKED" ||
+        (current.telemetry !== "CONNECTED" && current.telemetry !== "VERIFIED") ||
         !event.termsAccepted ||
         current.accountMode === event.mode
       ) {
