@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { getDb } from "../queries/connection";
+import { getAffectedRowsCount } from "./risk-execution-intent-db-result";
 import { riskExecutionIntents } from "@db/schema";
 import {
   transitionCloseIntent,
@@ -11,14 +12,6 @@ import {
 export type StoredCloseIntent = typeof riskExecutionIntents.$inferSelect;
 
 export const DEFAULT_CLOSE_INTENT_LEASE_MS = 120_000;
-
-/** Normalize Drizzle mysql2 update results before treating a lease write as successful. */
-export function getAffectedRowsCount(result: unknown): number {
-  const header = Array.isArray(result) ? result[0] : result;
-  if (!header || typeof header !== "object" || !("affectedRows" in header)) return 0;
-  const count = Number((header as { affectedRows?: unknown }).affectedRows);
-  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
-}
 
 export async function getPendingCloseIntent(
   accountId: number,
