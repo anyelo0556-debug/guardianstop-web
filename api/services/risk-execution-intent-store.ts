@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, lte, or } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { getDb } from "../queries/connection";
 import { riskExecutionIntents } from "@db/schema";
 import {
@@ -11,6 +11,14 @@ import {
 export type StoredCloseIntent = typeof riskExecutionIntents.$inferSelect;
 
 export const DEFAULT_CLOSE_INTENT_LEASE_MS = 120_000;
+
+/** Normalize Drizzle mysql2 update results before treating a lease write as successful. */
+export function getAffectedRowsCount(result: unknown): number {
+  const header = Array.isArray(result) ? result[0] : result;
+  if (!header || typeof header !== "object" || !("affectedRows" in header)) return 0;
+  const count = Number((header as { affectedRows?: unknown }).affectedRows);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
 
 export async function getPendingCloseIntent(
   accountId: number,
@@ -96,7 +104,7 @@ export async function claimPendingCloseIntent(
   const now = new Date(nowMs);
   const db = getDb();
 
-  await db
+  const claimResult = await db
     .update(riskExecutionIntents)
     .set({
       leaseOwner,
@@ -112,6 +120,10 @@ export async function claimPendingCloseIntent(
       ),
     ));
 
+  // Do not infer ownership from a follow-up read unless this UPDATE actually
+  // changed exactly one row. This keeps the claim decision tied to the CAS.
+  if (getAffectedRowsCount(claimResult) !== 1) return null;
+
   const [claimed] = await db
     .select()
     .from(riskExecutionIntents)
@@ -126,8 +138,44 @@ export async function claimPendingCloseIntent(
 }
 
 /**
- * Apply an event only while the caller still owns the lease. Clearing the
- * lease in the same UPDATE prevents a stale worker from overwriting a newer
+ * Extend a lease only while it is still valid and owned by this worker.
+ * An expired lease cannot be resurrected after another worker may have claimed it.
+ */
+export async function renewPendingCloseIntentLease(
+  idempotencyKey: string,
+  leaseOwner: string,
+  leaseMs = DEFAULT_CLOSE_INTENT_LEASE_MS,
+): Promise<boolean> {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 10 * 60_000) {
+    throw new Error("CLOSE_INTENT_INVALID_LEASE_DURATION");
+  }
+
+  const nowMs = Date.now();
+  const leaseUntilMs = nowMs + leaseMs;
+  if (!Number.isSafeInteger(leaseUntilMs)) {
+    throw new Error("CLOSE_INTENT_INVALID_LEASE_EXPIRY");
+  }
+
+  const now = new Date(nowMs);
+  const result = await getDb()
+    .update(riskExecutionIntents)
+    .set({
+      leaseUntil: new Date(leaseUntilMs),
+      updatedAt: now,
+    })
+    .where(and(
+      eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
+      eq(riskExecutionIntents.status, "pending"),
+      eq(riskExecutionIntents.leaseOwner, leaseOwner),
+      gt(riskExecutionIntents.leaseUntil, now),
+    ));
+
+  return getAffectedRowsCount(result) === 1;
+}
+
+/**
+ * Apply an event only while the caller still owns an unexpired lease. Clearing
+ * the lease in the same UPDATE prevents a stale worker from overwriting a newer
  * claim. Confirmed intents also release the account's unique active lock.
  */
 export async function recordCloseIntentEvent(
@@ -138,6 +186,7 @@ export async function recordCloseIntentEvent(
     | { type: "BROKER_FLAT_CONFIRMED"; occurredAtMs?: number },
 ): Promise<void> {
   const db = getDb();
+  const leaseCheckTime = new Date();
   const [stored] = await db
     .select()
     .from(riskExecutionIntents)
@@ -145,6 +194,7 @@ export async function recordCloseIntentEvent(
       eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
       eq(riskExecutionIntents.status, "pending"),
       eq(riskExecutionIntents.leaseOwner, leaseOwner),
+      gt(riskExecutionIntents.leaseUntil, leaseCheckTime),
     ))
     .limit(1);
 
@@ -169,7 +219,8 @@ export async function recordCloseIntentEvent(
     throw new Error("CLOSE_INTENT_EVENT_REJECTED");
   }
 
-  await db
+  const updateTime = new Date();
+  const updateResult = await db
     .update(riskExecutionIntents)
     .set({
       status: next.status === "CONFIRMED" ? "confirmed" : "pending",
@@ -184,11 +235,16 @@ export async function recordCloseIntentEvent(
         ? null
         : new Date(next.confirmedAtMs),
       lastErrorCode: next.lastErrorCode,
-      updatedAt: new Date(),
+      updatedAt: updateTime,
     })
     .where(and(
       eq(riskExecutionIntents.idempotencyKey, idempotencyKey),
       eq(riskExecutionIntents.status, "pending"),
       eq(riskExecutionIntents.leaseOwner, leaseOwner),
+      gt(riskExecutionIntents.leaseUntil, updateTime),
     ));
+
+  if (getAffectedRowsCount(updateResult) !== 1) {
+    throw new Error("CLOSE_INTENT_LEASE_LOST");
+  }
 }
