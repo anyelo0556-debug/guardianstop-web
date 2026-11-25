@@ -143,8 +143,7 @@ describe("normalized REAL/PROP risk evaluator", () => {
       firmRules: { status: "VERIFIED", remainingCapacityUsd: "0.00" },
     }));
     expect(result.decision).toBe("PROTECT");
-    expect(result.triggers).toEqual([]);
-    expect(result.triggers).toContain("PROP_FIRM_LIMIT");
+    expect(result.triggers).toEqual(["PROP_FIRM_LIMIT"]);
   });
 
   it("accepts negative verified firm capacity as an already-breached boundary", () => {
