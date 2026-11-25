@@ -239,7 +239,7 @@ async function cerrarYVerificar(
   igSession: IGSession,
   positions: IGPosition[],
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   const commandResult = await igCloseAllPositions(igSession, positions);
   let remainingPositions: IGPosition[] | null = null;
 
@@ -262,7 +262,7 @@ async function cerrarYVerificar(
       message: `IG ya no reporta posiciones abiertas después de la protección ${reason}. La confirmación se obtuvo consultando nuevamente la cuenta.`,
     });
     console.log(`[PROTECTION] Account ${account.accountId}: CLOSE_CONFIRMED after ${reason}`);
-    return;
+    return true;
   }
 
   const now = Date.now();
@@ -284,6 +284,7 @@ async function cerrarYVerificar(
   console.error(
     `[PROTECTION] Account ${account.accountId}: CLOSE_UNCONFIRMED after ${reason}; accepted=${commandResult.closed}; failed=${commandResult.failed}; remaining=${remainingPositions?.length ?? "unknown"}`,
   );
+  return false;
 }
 
 // ============================================================
@@ -398,13 +399,10 @@ async function ejecutarProteccion(
           profitPct: 0,
         }));
 
-        await cerrarYVerificar(account, igSession, positions, "trailing stop");
+        const closeConfirmed = await cerrarYVerificar(account, igSession, positions, "trailing stop");
 
         // Reset the peak only after the broker confirms there are no open positions.
-        const remainingAfterClose = await igGetPositions(igSession);
-        if (remainingAfterClose.length === 0) {
-          peakPnL.set(account.accountId, 0);
-        }
+        if (closeConfirmed) peakPnL.set(account.accountId, 0);
       }
     }
   }
