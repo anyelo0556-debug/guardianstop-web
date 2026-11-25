@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAffectedRowsCount } from "./risk-execution-intent-store";
+import { getAffectedRowsCount } from "./risk-execution-intent-db-result";
 
 describe("durable close lease update results", () => {
   it("reads the mysql2 ResultSetHeader from Drizzle tuple results", () => {
