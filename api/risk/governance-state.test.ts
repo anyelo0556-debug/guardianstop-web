@@ -144,6 +144,19 @@ describe("Guardian Stop governance state machine", () => {
     expect(restored.telemetry).toBe("RECONCILIATION_REQUIRED");
   });
 
+  it("does not downgrade a pending reconciliation to degraded telemetry", () => {
+    const pending = transitionRiskGovernance(
+      transitionRiskGovernance(
+        createInitialRiskGovernanceState("REAL"),
+        { type: "HEARTBEAT_LOST" },
+      ),
+      { type: "HEARTBEAT_RESTORED" },
+    );
+    expect(transitionRiskGovernance(pending, {
+      type: "HEARTBEAT_DEGRADED",
+    })).toBe(pending);
+  });
+
   it("marks failed reconciliation for incident review", () => {
     const restored = transitionRiskGovernance(
       transitionRiskGovernance(
