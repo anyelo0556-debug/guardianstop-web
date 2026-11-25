@@ -90,7 +90,8 @@ export function transitionRiskGovernance(
         : current;
 
     case "RISK_BREACH": {
-      if (!Number.isSafeInteger(event.occurredAtMs) || event.occurredAtMs < 0) {
+      if (!Number.isSafeInteger(event.occurredAtMs) || event.occurredAtMs < 0 ||
+          event.occurredAtMs > Number.MAX_SAFE_INTEGER - GUARDIAN_LOCKOUT_MS) {
         return current;
       }
       if (current.discipline === "LOCKED") return current;
@@ -103,7 +104,8 @@ export function transitionRiskGovernance(
     }
 
     case "HEARTBEAT_DEGRADED":
-      return current.telemetry === "INCIDENT_REVIEW" || current.telemetry === "LOST"
+      return current.telemetry === "INCIDENT_REVIEW" || current.telemetry === "LOST" ||
+        current.telemetry === "RECONCILIATION_REQUIRED"
         ? current
         : { ...current, telemetry: "DEGRADED" };
 
