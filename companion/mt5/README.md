@@ -1,41 +1,38 @@
-# Guardian Stop — MT5 demo diagnostic (read-only)
+# Guardian Stop — MT5 DEMO Companion
 
-## Purpose
+Windows local companion for the already-authenticated MetaTrader 5 desktop terminal, using the official `MetaTrader5` Python package. No broker password, API token, or separate broker API is requested.
 
-This is the first local integration check for the Windows Companion. It verifies that Guardian Stop can read the already-open MetaTrader 5 terminal, identify a DEMO account, and obtain account/position telemetry.
+## Install and read status
 
-**It does not place, modify, or close orders.** It rejects REAL, CONTEST, and unknown account modes. It does not ask for or store broker passwords or API tokens.
-
-## Requirements
-
-- Windows with MetaTrader 5 desktop installed and already logged into a broker DEMO account.
-- Python 3.11 (64-bit) installed.
-- The terminal must remain open during the diagnostic.
-
-Open PowerShell and run:
+Open MT5 and log into a disposable DEMO account. In PowerShell:
 
 ```powershell
 py -3.11 -m pip install MetaTrader5
-py -3.11 companion/mt5/diagnostic.py
+py -3.11 companion/mt5/guardian_companion.py status
 ```
 
-If multiple MT5 terminals are installed, pass the full path:
+The status command reads account balance/equity and open positions. It refuses disconnected and non-DEMO accounts.
+
+## Explicit DEMO close test
+
+This sends real close requests to the connected broker DEMO server; it is not a simulation. Use only a disposable DEMO account with positions you intend to close.
 
 ```powershell
-py -3.11 companion/mt5/diagnostic.py --terminal-path "C:\Program Files\MetaTrader 5\terminal64.exe"
+$env:GUARDIAN_MT5_ALLOW_DEMO_CLOSE = "YES"
+py -3.11 companion/mt5/guardian_companion.py close-all
 ```
 
-The script prints a sanitized JSON snapshot. The login is masked to its last four digits. No secrets are read or printed.
+The operator must type the displayed account-suffix confirmation. Each close sends the opposite market side and re-queries the exact position ticket to verify it disappeared. Failed or unverified closes are reported individually. The process exits non-zero if any close is not verified.
 
-## Acceptance criteria
+## Safety and current scope
 
-- `mode` is `DEMO`.
-- `read_only` is true and `orders_sent` is zero.
-- Terminal connection is true.
-- Balance/equity/currency are present.
-- Positions count and position fields match the demo terminal.
-- Running against a REAL account must stop with an explicit refusal.
+- LIVE, CONTEST, disconnected, and trade-disabled terminals are blocked.
+- Close-all is opt-in and interactive; it is not silently triggered by a cloud command.
+- This is a local DEMO execution milestone, not yet the complete Guardian Stop SaaS integration. Authenticated device registration, secure heartbeat/telemetry upload, TiDB persistence, cloud risk-state delivery, and end-to-end Render validation remain outstanding.
+- Never put broker passwords, terminal credentials, or account secrets in source control or chat.
 
-## Next integration stage
+## Tests
 
-Only after the read-only diagnostic passes on a DEMO terminal should we add authenticated heartbeat, device binding, and a simulated close-intent test. A real `order_send` close test is a separate stage and requires explicit confirmation that the selected terminal is a disposable DEMO account.
+```powershell
+py -3.11 -m unittest engine.tests.test_mt5_companion -v
+```
