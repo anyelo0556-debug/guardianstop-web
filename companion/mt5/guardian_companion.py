@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -128,8 +129,10 @@ def close_all_demo_positions(mt5: Any, expected_login_suffix: str) -> dict[str, 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Guardian Stop MT5 DEMO companion")
-    parser.add_argument("command", choices=("status", "close-all"))
+    parser.add_argument("command", choices=("status", "watch", "close-all"))
     parser.add_argument("--terminal-path")
+    parser.add_argument("--interval", type=float, default=2.0,
+                        help="Seconds between MT5 checks in watch mode (minimum 1)")
     args = parser.parse_args()
 
     try:
@@ -146,6 +149,51 @@ def main() -> int:
         if args.command == "status":
             print(json.dumps(build_snapshot(mt5), indent=2, ensure_ascii=False))
             return 0
+
+        if args.command == "watch":
+            interval = max(1.0, args.interval)
+            print("GUARDIAN STOP WATCH MODE — DEMO")
+            print("Monitoring MT5 continuously. No positions will be opened or closed.")
+            print("Press Ctrl+C to stop.\n")
+            previous = {}
+            while True:
+                try:
+                    snapshot = build_snapshot(mt5)
+                    account = snapshot["account"]
+                    positions = snapshot["positions"]
+                    current = {str(p["ticket"]): p for p in positions}
+                    print(
+                        f'[{snapshot["captured_at"]}] '
+                        f'Account ...{account["login_suffix"]} | '
+                        f'Balance: {account["balance"]:.2f} {account["currency"]} | '
+                        f'Equity: {account["equity"]:.2f} | '
+                        f'Open positions: {len(positions)}'
+                    )
+                    for ticket, position in current.items():
+                        if ticket not in previous:
+                            print(
+                                f'  NEW POSITION #{ticket}: {position["symbol"]} '
+                                f'{position["side"]} {position["volume"]} lots | '
+                                f'P/L: {position["profit"]:.2f}'
+                            )
+                        else:
+                            old_position = previous[ticket]
+                            if (position["profit"] != old_position["profit"]
+                                    or position["volume"] != old_position["volume"]):
+                                print(
+                                    f'  UPDATE #{ticket}: {position["symbol"]} '
+                                    f'{position["side"]} | P/L: {position["profit"]:.2f}'
+                                )
+                    for ticket, position in previous.items():
+                        if ticket not in current:
+                            print(
+                                f'  POSITION CLOSED #{ticket}: {position["symbol"]} '
+                                f'{position["side"]}'
+                            )
+                    previous = current
+                except Exception as exc:
+                    print(f"MONITORING ERROR: {exc}", file=sys.stderr)
+                time.sleep(interval)
 
         if os.environ.get("GUARDIAN_MT5_ALLOW_DEMO_CLOSE") != "YES":
             print("Blocked. Set GUARDIAN_MT5_ALLOW_DEMO_CLOSE=YES only for a disposable DEMO account.", file=sys.stderr)
