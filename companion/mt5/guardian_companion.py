@@ -154,46 +154,28 @@ def main() -> int:
             interval = max(1.0, args.interval)
             print("GUARDIAN STOP WATCH MODE — DEMO")
             print("Monitoring MT5 continuously. No positions will be opened or closed.")
-            print("Press Ctrl+C to stop.\n")
-            previous = {}
-            while True:
-                try:
+            print("Live status updates in one console line. Press Ctrl+C to stop.\n")
+            try:
+                while True:
                     snapshot = build_snapshot(mt5)
                     account = snapshot["account"]
                     positions = snapshot["positions"]
-                    current = {str(p["ticket"]): p for p in positions}
-                    print(
-                        f'[{snapshot["captured_at"]}] '
-                        f'Account ...{account["login_suffix"]} | '
-                        f'Balance: {account["balance"]:.2f} {account["currency"]} | '
-                        f'Equity: {account["equity"]:.2f} | '
-                        f'Open positions: {len(positions)}'
+                    total_profit = sum(float(p["profit"]) for p in positions)
+                    status = (
+                        f'[{datetime.now().astimezone().strftime("%H:%M:%S")}] '
+                        f'MT5 DEMO ...{account["login_suffix"]} | '
+                        f'Balance {account["balance"]:.2f} {account["currency"]} | '
+                        f'Equity {account["equity"]:.2f} | '
+                        f'Posiciones {len(positions)} | '
+                        f'P/L abierto {total_profit:+.2f}'
                     )
-                    for ticket, position in current.items():
-                        if ticket not in previous:
-                            print(
-                                f'  NEW POSITION #{ticket}: {position["symbol"]} '
-                                f'{position["side"]} {position["volume"]} lots | '
-                                f'P/L: {position["profit"]:.2f}'
-                            )
-                        else:
-                            old_position = previous[ticket]
-                            if (position["profit"] != old_position["profit"]
-                                    or position["volume"] != old_position["volume"]):
-                                print(
-                                    f'  UPDATE #{ticket}: {position["symbol"]} '
-                                    f'{position["side"]} | P/L: {position["profit"]:.2f}'
-                                )
-                    for ticket, position in previous.items():
-                        if ticket not in current:
-                            print(
-                                f'  POSITION CLOSED #{ticket}: {position["symbol"]} '
-                                f'{position["side"]}'
-                            )
-                    previous = current
-                except Exception as exc:
-                    print(f"MONITORING ERROR: {exc}", file=sys.stderr)
-                time.sleep(interval)
+                    sys.stdout.write("\\r" + status + " " * 8)
+                    sys.stdout.flush()
+                    time.sleep(interval)
+            except KeyboardInterrupt:
+                sys.stdout.write("\\nVigilancia detenida por el usuario.\\n")
+                sys.stdout.flush()
+                return 0
 
         if os.environ.get("GUARDIAN_MT5_ALLOW_DEMO_CLOSE") != "YES":
             print("Blocked. Set GUARDIAN_MT5_ALLOW_DEMO_CLOSE=YES only for a disposable DEMO account.", file=sys.stderr)
