@@ -154,7 +154,7 @@ def main() -> int:
             interval = max(1.0, args.interval)
             print("GUARDIAN STOP WATCH MODE — DEMO")
             print("Monitoring MT5 continuously. No positions will be opened or closed.")
-            print("Live status updates in one console line. Press Ctrl+C to stop.\n")
+            print("WATCH_SINGLE_LINE_V2 | Una sola linea de estado. Ctrl+C para detener.\n")
             try:
                 while True:
                     snapshot = build_snapshot(mt5)
@@ -169,7 +169,7 @@ def main() -> int:
                         f'Posiciones {len(positions)} | '
                         f'P/L abierto {total_profit:+.2f}'
                     )
-                    sys.stdout.write("\r" + status + " " * 8)
+                    sys.stdout.write("\x1b[2K\r" + status + " " * 12)
                     sys.stdout.flush()
                     time.sleep(interval)
             except KeyboardInterrupt:
