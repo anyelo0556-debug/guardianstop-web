@@ -169,11 +169,11 @@ def main() -> int:
                         f'Posiciones {len(positions)} | '
                         f'P/L abierto {total_profit:+.2f}'
                     )
-                    sys.stdout.write("\\r" + status + " " * 8)
+                    sys.stdout.write("\r" + status + " " * 8)
                     sys.stdout.flush()
                     time.sleep(interval)
             except KeyboardInterrupt:
-                sys.stdout.write("\\nVigilancia detenida por el usuario.\\n")
+                sys.stdout.write("\nVigilancia detenida por el usuario.\n")
                 sys.stdout.flush()
                 return 0
 
